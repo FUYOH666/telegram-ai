@@ -174,6 +174,7 @@ class AIClient:
         top_p: Optional[float] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        rag_system=None,
     ) -> str:
         """
         Получить ответ от AI-сервера.
@@ -187,6 +188,7 @@ class AIClient:
             top_p: Top-p sampling parameter (опционально)
             frequency_penalty: Frequency penalty parameter (опционально)
             presence_penalty: Presence penalty parameter (опционально)
+            rag_system: Экземпляр RAGSystem для поиска релевантной информации (опционально)
 
         Returns:
             Ответ от AI-сервера (обрезанный до max_response_length если указано)
@@ -201,13 +203,33 @@ class AIClient:
         final_messages = messages.copy()
         date_info = self._get_date_info()
         
-        if date_info:
+        # Поиск релевантной информации через RAG (если включено)
+        rag_context = ""
+        if rag_system and rag_system.enabled:
+            try:
+                # Извлекаем последнее пользовательское сообщение для поиска
+                user_query = ""
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        user_query = msg.get("content", "")
+                        break
+                
+                if user_query:
+                    found_info = await rag_system.search_relevant_info(user_query)
+                    if found_info:
+                        rag_context = rag_system.format_context(found_info)
+                        logger.debug(f"RAG found {len(found_info)} relevant chunks for query: {user_query[:50]}...")
+            except Exception as e:
+                logger.warning(f"Error searching RAG knowledge base: {e}", exc_info=True)
+        
+        if date_info or rag_context:
             # Ищем существующее системное сообщение
             system_found = False
             for msg in final_messages:
                 if msg.get("role") == "system":
-                    # Добавляем дату в начало существующего системного сообщения
-                    msg["content"] = date_info + msg["content"]
+                    # Добавляем дату и RAG контекст в начало существующего системного сообщения
+                    enhanced_content = date_info + rag_context + "\n\n" + msg["content"] if rag_context else date_info + msg["content"]
+                    msg["content"] = enhanced_content
                     system_found = True
                     break
             
@@ -215,10 +237,12 @@ class AIClient:
             if not system_found:
                 dynamic_prompt = self._get_dynamic_system_prompt()
                 if dynamic_prompt:
-                    final_messages.insert(0, {"role": "system", "content": dynamic_prompt})
+                    enhanced_prompt = date_info + rag_context + "\n\n" + dynamic_prompt if rag_context else date_info + dynamic_prompt
+                    final_messages.insert(0, {"role": "system", "content": enhanced_prompt})
                 else:
-                    # Если нет основного промпта, добавляем только дату
-                    final_messages.insert(0, {"role": "system", "content": date_info})
+                    # Если нет основного промпта, добавляем только дату и RAG контекст
+                    content = date_info + rag_context if rag_context else date_info
+                    final_messages.insert(0, {"role": "system", "content": content})
 
         payload = {
             "model": self.model,

@@ -21,6 +21,7 @@ from .language_detector import (
     SUPPORTED_LANGUAGES,
 )
 from .memory import Memory
+from .rag import RAGSystem
 from .rate_limiter import RateLimiter
 from .sales_flow import SalesFlow, SalesStage
 from .slot_extractor import SlotExtractor
@@ -54,6 +55,7 @@ class TelegramUserClient:
         self.tools: Optional[Tools] = None
         self.slot_extractor: Optional[SlotExtractor] = None
         self.vector_memory: Optional[VectorMemory] = None
+        self.rag_system: Optional[RAGSystem] = None
 
         # Инициализируем компоненты
         self._init_components()
@@ -95,6 +97,30 @@ class TelegramUserClient:
             )
             self.vector_memory = vector_memory
             logger.info("VectorMemory initialized")
+
+        # RAG System (если включен)
+        if self.config.rag.enabled:
+            # Используем vector_memory если доступен, иначе создаем новый для RAG
+            rag_vector_memory = vector_memory
+            if not rag_vector_memory:
+                # Создаем отдельный VectorMemory для RAG если основной не включен
+                rag_vector_memory = VectorMemory(
+                    persist_directory=self.config.memory.vector_db_path,
+                    collection_name="rag_knowledge_base",
+                    ai_client=self.ai_client,
+                    enabled=True,
+                )
+            
+            self.rag_system = RAGSystem(
+                vector_memory=rag_vector_memory,
+                enabled=self.config.rag.enabled,
+                knowledge_base_path=self.config.rag.knowledge_base_path,
+                max_results=self.config.rag.max_results,
+                min_score=self.config.rag.min_score,
+            )
+            logger.info("RAGSystem initialized")
+        else:
+            self.rag_system = None
 
         # Memory
         self.memory = Memory(
@@ -228,6 +254,18 @@ class TelegramUserClient:
         me = await self.client.get_me()
         logger.info(f"✅ Authorized as {me.first_name} (@{me.username})")
         logger.info(f"Session saved to: {session_path}")
+
+        # Загружаем базу знаний RAG если включено и настроено
+        if self.rag_system and self.config.rag.auto_load_on_startup:
+            try:
+                logger.info("Loading RAG knowledge base...")
+                loaded_count = await self.rag_system.load_knowledge_base()
+                if loaded_count > 0:
+                    logger.info(f"✅ RAG knowledge base loaded: {loaded_count} chunks")
+                else:
+                    logger.warning("RAG knowledge base is empty or not found")
+            except Exception as e:
+                logger.warning(f"Failed to load RAG knowledge base: {e}", exc_info=True)
 
         # Регистрируем обработчики
         self._register_handlers()
@@ -813,6 +851,7 @@ class TelegramUserClient:
                         top_p=generation_params.get("top_p"),
                         frequency_penalty=generation_params.get("frequency_penalty"),
                         presence_penalty=generation_params.get("presence_penalty"),
+                        rag_system=self.rag_system,
                     )
                     ai_request_time = time.time() - ai_request_start
                     logger.info(f"✅ AI response received in {ai_request_time:.2f}s ({len(response)} chars): {response[:150]}...")

@@ -233,6 +233,33 @@ class IntentClassifierConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="INTENT_CLASSIFIER_")
 
 
+class RAGConfig(BaseSettings):
+    """Конфигурация RAG системы для базы знаний компании."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Включить RAG систему для поиска информации о компании/услугах",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    knowledge_base_path: Optional[str] = Field(
+        default=None,
+        description="Путь к директории с документацией компании (текстовые файлы .txt, .md)",
+    )
+    max_results: int = Field(
+        default=3, description="Максимальное количество результатов поиска"
+    )
+    min_score: float = Field(
+        default=0.7,
+        description="Минимальный score для включения результата в контекст (0.0-1.0)",
+    )
+    auto_load_on_startup: bool = Field(
+        default=True,
+        description="Автоматически загружать базу знаний при старте приложения",
+    )
+
+    model_config = SettingsConfigDict(env_prefix="RAG_")
+
+
 class Config(BaseSettings):
     """Основная конфигурация приложения."""
 
@@ -246,6 +273,7 @@ class Config(BaseSettings):
     slot_extraction: SlotExtractionConfig
     web_search: WebSearchConfig
     intent_classifier: IntentClassifierConfig
+    rag: RAGConfig
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "Config":
@@ -310,6 +338,15 @@ class Config(BaseSettings):
         # Intent Classifier конфигурация
         intent_classifier = IntentClassifierConfig(**yaml_data.get("intent_classifier", {}))
 
+        # RAG конфигурация
+        rag_data = yaml_data.get("rag", {})
+        enabled_val = rag_data.get("enabled", False)
+        if isinstance(enabled_val, str):
+            rag_data["enabled"] = enabled_val.lower() in ("true", "1", "yes")
+        elif not isinstance(enabled_val, bool):
+            rag_data["enabled"] = bool(enabled_val)
+        rag = RAGConfig(**rag_data)
+
         return cls(
             telegram=telegram,
             ai_server=ai_server,
@@ -321,6 +358,7 @@ class Config(BaseSettings):
             slot_extraction=slot_extraction,
             web_search=web_search,
             intent_classifier=intent_classifier,
+            rag=rag,
         )
 
     @staticmethod
