@@ -1,12 +1,17 @@
 """Конфигурация приложения через pydantic-settings."""
 
 import logging
+import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Загружаем .env файл
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +45,7 @@ class AIServerConfig(BaseSettings):
         default=None, description="API ключ (опционально)"
     )
     model: str = Field(
-        default="Qwen3-30B-A3B-Instruct-2507-AWQ-4bit",
+        default="Qwen/Qwen2.5-14B-Instruct-AWQ",
         description="Название модели",
     )
     timeout: int = Field(default=30, description="Таймаут запроса в секундах")
@@ -49,6 +54,18 @@ class AIServerConfig(BaseSettings):
     )
     max_tokens: int = Field(
         default=4096, description="Максимальное количество токенов в ответе"
+    )
+    system_prompt: Optional[str] = Field(
+        default=None, description="Системный промпт для настройки поведения модели"
+    )
+    temperature: float = Field(
+        default=0.7, description="Температура генерации (0.0-1.0)"
+    )
+    timezone: str = Field(
+        default="Europe/Moscow", description="Часовой пояс для конвертации UTC"
+    )
+    date_format: Optional[str] = Field(
+        default=None, description="Формат даты (опционально, используется дефолтный если None)"
     )
 
     model_config = SettingsConfigDict(env_prefix="AI_SERVER_")
@@ -73,7 +90,11 @@ class MemoryConfig(BaseSettings):
 class GoogleCalendarConfig(BaseSettings):
     """Конфигурация Google Calendar."""
 
-    enabled: bool = Field(default=False, description="Включить интеграцию")
+    enabled: bool = Field(
+        default=False,
+        description="Включить интеграцию",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
     credentials_path: str = Field(
         default="./credentials/google-calendar.json",
         description="Путь к credentials файлу",
@@ -81,8 +102,77 @@ class GoogleCalendarConfig(BaseSettings):
     token_path: str = Field(
         default="./credentials/token.json", description="Путь к token файлу"
     )
+    auto_create_consultations: bool = Field(
+        default=True, description="Автоматически создавать встречи при запросах"
+    )
+    default_consultation_duration_minutes: int = Field(
+        default=60, description="Длительность консультации по умолчанию (минуты)"
+    )
+    available_slots: List[str] = Field(
+        default_factory=lambda: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"],
+        description="Доступные слоты времени для встреч",
+    )
 
     model_config = SettingsConfigDict(env_prefix="GOOGLE_CALENDAR_")
+
+
+class SpamDetectionConfig(BaseSettings):
+    """Конфигурация детекции спама."""
+
+    max_repeated_messages: int = Field(
+        default=3, description="Максимальное количество повторяющихся сообщений подряд"
+    )
+    min_message_length: int = Field(
+        default=2, description="Минимальная длина сообщения (символов)"
+    )
+    max_message_length: int = Field(
+        default=5000, description="Максимальная длина сообщения (символов)"
+    )
+
+
+class RateLimitingConfig(BaseSettings):
+    """Конфигурация rate limiting."""
+
+    enabled: bool = Field(
+        default=True, description="Включить rate limiting"
+    )
+    messages_per_minute: int = Field(
+        default=10, description="Максимальное количество сообщений в минуту"
+    )
+    messages_per_hour: int = Field(
+        default=50, description="Максимальное количество сообщений в час"
+    )
+    min_interval_seconds: int = Field(
+        default=2, description="Минимальный интервал между сообщениями (секунды)"
+    )
+    block_duration_minutes: int = Field(
+        default=10, description="Длительность блокировки при превышении лимита (минуты)"
+    )
+    spam_detection: SpamDetectionConfig = Field(
+        default_factory=SpamDetectionConfig, description="Настройки детекции спама"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="RATE_LIMITING_")
+
+
+class ASRServerConfig(BaseSettings):
+    """Конфигурация ASR сервера."""
+
+    base_url: str = Field(
+        default="http://100.93.82.48:8001", description="Базовый URL ASR сервера"
+    )
+    timeout: int = Field(default=60, description="Таймаут запроса в секундах")
+    enabled: bool = Field(default=True, description="Включить обработку голосовых сообщений")
+
+    model_config = SettingsConfigDict(env_prefix="ASR_SERVER_")
+
+
+class SalesFlowConfig(BaseSettings):
+    """Конфигурация скрипта продаж."""
+
+    enabled: bool = Field(default=True, description="Включить скрипт продаж")
+
+    model_config = SettingsConfigDict(env_prefix="SALES_FLOW_")
 
 
 class Config(BaseSettings):
@@ -92,6 +182,9 @@ class Config(BaseSettings):
     ai_server: AIServerConfig
     memory: MemoryConfig
     google_calendar: GoogleCalendarConfig
+    rate_limiting: RateLimitingConfig
+    asr_server: ASRServerConfig
+    sales_flow: SalesFlowConfig
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "Config":
@@ -119,13 +212,36 @@ class Config(BaseSettings):
         telegram = TelegramConfig(**yaml_data.get("telegram", {}))
         ai_server = AIServerConfig(**yaml_data.get("ai_server", {}))
         memory = MemoryConfig(**yaml_data.get("memory", {}))
-        google_calendar = GoogleCalendarConfig(**yaml_data.get("google_calendar", {}))
+        
+        # Парсим enabled как boolean если это строка
+        google_cal_data = yaml_data.get("google_calendar", {})
+        enabled_val = google_cal_data.get("enabled", False)
+        if isinstance(enabled_val, str):
+            google_cal_data["enabled"] = enabled_val.lower() in ("true", "1", "yes")
+        elif not isinstance(enabled_val, bool):
+            google_cal_data["enabled"] = bool(enabled_val)
+        google_calendar = GoogleCalendarConfig(**google_cal_data)
+
+        # Rate limiting конфигурация
+        rate_limiting_data = yaml_data.get("rate_limiting", {})
+        spam_detection_data = rate_limiting_data.get("spam_detection", {})
+        rate_limiting_data["spam_detection"] = SpamDetectionConfig(**spam_detection_data)
+        rate_limiting = RateLimitingConfig(**rate_limiting_data)
+
+        # ASR server конфигурация
+        asr_server = ASRServerConfig(**yaml_data.get("asr_server", {}))
+
+        # Sales flow конфигурация
+        sales_flow = SalesFlowConfig(**yaml_data.get("sales_flow", {}))
 
         return cls(
             telegram=telegram,
             ai_server=ai_server,
             memory=memory,
             google_calendar=google_calendar,
+            rate_limiting=rate_limiting,
+            asr_server=asr_server,
+            sales_flow=sales_flow,
         )
 
     @staticmethod
@@ -192,7 +308,9 @@ class Config(BaseSettings):
             creds_path = Path(self.google_calendar.credentials_path)
             if not creds_path.exists():
                 errors.append(
-                    f"Google Calendar credentials file not found: {creds_path}"
+                    f"Google Calendar credentials file not found: {creds_path}. "
+                    "Either disable Google Calendar (GOOGLE_CALENDAR_ENABLED=false) "
+                    "or create OAuth 2.0 credentials (Desktop app type) in Google Cloud Console."
                 )
 
         if errors:

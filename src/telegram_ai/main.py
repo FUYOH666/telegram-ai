@@ -4,19 +4,29 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
+from datetime import datetime
 
 from .config import Config
 
-# Настройка логирования
+# Создаем директорию для логов
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
+
+# Имя файла лога с датой
+log_file = logs_dir / f"telegram-ai-{datetime.now().strftime('%Y%m%d')}.log"
+
+# Настройка логирования - и в консоль, и в файл
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.DEBUG,  # DEBUG для детального логирования
+    format="%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(sys.stdout),  # Консоль
+        logging.FileHandler(log_file, encoding="utf-8"),  # Файл
     ],
 )
 
 logger = logging.getLogger(__name__)
+logger.info(f"Logging initialized. Log file: {log_file}")
 
 
 async def main():

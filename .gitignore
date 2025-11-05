@@ -54,6 +54,10 @@ data/
 # Logs
 *.log
 logs/
+!logs/.gitkeep
+
+# Temporary files
+temp_audio/
 
 # OS
 .DS_Store

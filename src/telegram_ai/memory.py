@@ -58,6 +58,22 @@ class UserContext(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class RateLimit(Base):
+    """Модель таблицы rate_limits для защиты от флуда."""
+
+    __tablename__ = "rate_limits"
+
+    user_id = Column(Integer, primary_key=True)
+    message_count_minute = Column(Integer, default=0, nullable=False)
+    message_count_hour = Column(Integer, default=0, nullable=False)
+    window_start_minute = Column(DateTime, nullable=False)
+    window_start_hour = Column(DateTime, nullable=False)
+    blocked_until = Column(DateTime, nullable=True)
+    last_message_time = Column(DateTime, nullable=False)
+    repeated_messages = Column(Integer, default=0, nullable=False)
+    last_message_content = Column(Text, nullable=True)
+
+
 class Memory:
     """Управление памятью и контекстом диалогов."""
 

@@ -4,25 +4,71 @@ telegram:
   phone: ${TELEGRAM_PHONE}
   session_path: ./sessions/scanovichai.session
   # Фильтры для обработки сообщений
-  handle_private_chats: true  # личные чаты
-  handle_groups: false  # группы
-  handle_channels: false  # каналы
+  handle_private_chats: true # личные чаты
+  handle_groups: false # группы
+  handle_channels: false # каналы
 
 ai_server:
   base_url: http://100.93.82.48:8000
-  api_key: ${AI_SERVER_API_KEY}  # опционально
-  model: Qwen3-30B-A3B-Instruct-2507-AWQ-4bit
+  api_key: ${AI_SERVER_API_KEY} # опционально
+  model: Qwen/Qwen2.5-14B-Instruct-AWQ
   timeout: 30
   max_retries: 3
-  max_tokens: 4096  # с учетом max_model_len=16384
+  max_tokens: 4096 # с учетом max_model_len=8192
+  system_prompt: |
+    Ты AI-ассистент Scanovich.ai — компании, специализирующейся на разработке AI-решений для бизнеса.
+
+    Твоя роль:
+    - Помогать пользователям с их вопросами дружелюбно и профессионально
+    - Естественно упоминать услуги Scanovich.ai когда это уместно и релевантно
+    - Продвигать AI-решения компании: разработка чат-ботов, Speech-to-Text, OCR, Computer Vision, Machine Learning и другие AI-сервисы
+    - Отвечать кратко, по делу, использовать эмодзи умеренно
+    - Если вопрос неясен — уточняй
+    - Используй естественный, живой язык общения — будь дружелюбным, но профессиональным
+    - Вариативность в ответах — используй разные формулировки, не повторяйся
+    - Отвечай так, как бы общался живой человек, а не робот
+    - Используй естественные переходы между темами, будь гибким в общении
+
+    О компании Scanovich.ai:
+    - Разрабатываем AI-решения для бизнеса любого масштаба
+    - Работаем с любыми AI-моделями (OpenAI, локальные LLM, custom модели)
+    - Предлагаем облачное, on-premise и гибридное развертывание
+    - Специализируемся на Healthcare, Finance, Legal, Telecom, Government, Education
+    - Сайт: https://scanovich.ai/
+
+    Важно: Не навязывай услуги, но естественно упоминай их когда пользователь спрашивает про AI, автоматизацию, или когда можно помочь бизнесу.
+  temperature: 0.8 # Увеличена для более естественных и вариативных ответов
+  timezone: Europe/Moscow # для конвертации UTC в МСК
+  date_format: "%d %B %Y года, %A, %H:%M (МСК)" # опционально
 
 memory:
   db_path: ./data/conversations.db
-  context_window: 10  # последних N сообщений для контекста
+  context_window: 10 # последних N сообщений для контекста
   max_history_days: 30
 
 google_calendar:
-  enabled: ${GOOGLE_CALENDAR_ENABLED:false}
+  enabled: ${GOOGLE_CALENDAR_ENABLED}
   credentials_path: ./credentials/google-calendar.json
   token_path: ./credentials/token.json
+  auto_create_consultations: true
+  default_consultation_duration_minutes: 60
+  available_slots: ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"]
 
+rate_limiting:
+  enabled: true
+  messages_per_minute: 10
+  messages_per_hour: 50
+  min_interval_seconds: 2
+  block_duration_minutes: 10
+  spam_detection:
+    max_repeated_messages: 3
+    min_message_length: 2
+    max_message_length: 5000
+
+asr_server:
+  base_url: http://100.93.82.48:8001
+  timeout: 60
+  enabled: true
+
+sales_flow:
+  enabled: true
