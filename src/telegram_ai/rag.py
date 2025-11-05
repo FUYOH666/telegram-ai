@@ -112,6 +112,13 @@ class RAGSystem:
                             "total_chunks": len(chunks),
                         }
 
+                        # Проверяем, не существует ли уже этот документ
+                        existing = self.rag_collection.get(ids=[doc_id])
+                        if existing and len(existing["ids"]) > 0:
+                            # Документ уже существует, пропускаем
+                            logger.debug(f"Skipping existing document: {doc_id}")
+                            continue
+
                         # Получаем embedding если доступен
                         embedding = await self.vector_memory.get_embedding(chunk)
 

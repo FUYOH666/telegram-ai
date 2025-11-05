@@ -112,7 +112,7 @@ class VectorMemory:
         Returns:
             Список чисел (embedding) или None
         """
-        if not self.ai_client:
+        if not self.ai_client or not self.ai_client.client:
             return None
 
         try:
@@ -123,17 +123,17 @@ class VectorMemory:
             if self.ai_client.api_key:
                 headers["Authorization"] = f"Bearer {self.ai_client.api_key}"
 
-            async with self.ai_client.client as client:
-                response = await client.post(
-                    url,
-                    json={"input": text, "model": self.ai_client.model},
-                    headers=headers,
-                    timeout=self.ai_client.timeout,
-                )
-                response.raise_for_status()
-                data = response.json()
-                if "data" in data and len(data["data"]) > 0:
-                    return data["data"][0]["embedding"]
+            # Используем клиент напрямую, без async with, так как он должен жить
+            # всё время жизни AIClient. Клиент закрывается только при закрытии AIClient.
+            response = await self.ai_client.client.post(
+                url,
+                json={"input": text, "model": self.ai_client.model},
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "data" in data and len(data["data"]) > 0:
+                return data["data"][0]["embedding"]
         except Exception as e:
             logger.debug(f"Embeddings API not available or error: {e}")
             return None
