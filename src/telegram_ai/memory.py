@@ -71,6 +71,31 @@ class RateLimit(Base):
     last_message_content = Column(Text, nullable=True)
 
 
+class GlobalRateLimit(Base):
+    """Модель таблицы global_rate_limits для глобального лимита на уровне аккаунта."""
+
+    __tablename__ = "global_rate_limits"
+
+    id = Column(Integer, primary_key=True, default=1)  # Всегда одна запись
+    message_count_minute = Column(Integer, default=0, nullable=False)
+    message_count_hour = Column(Integer, default=0, nullable=False)
+    window_start_minute = Column(DateTime, nullable=False)
+    window_start_hour = Column(DateTime, nullable=False)
+    blocked_until = Column(DateTime, nullable=True)
+    last_message_time = Column(DateTime, nullable=False)
+
+
+class FloodWaitHistory(Base):
+    """Модель таблицы flood_wait_history для отслеживания истории FloodWait событий."""
+
+    __tablename__ = "flood_wait_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    wait_seconds = Column(Integer, nullable=False)
+    occurred_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    chat_type = Column(String(20), nullable=True)  # 'private', 'group', 'channel'
+
+
 class ConversationSummary(Base):
     """Модель таблицы conversation_summaries для хранения резюме диалогов."""
 

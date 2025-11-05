@@ -141,6 +141,51 @@ class SpamDetectionConfig(BaseSettings):
     )
 
 
+class GlobalRateLimitingConfig(BaseSettings):
+    """Конфигурация глобального rate limiting на уровне аккаунта."""
+
+    enabled: bool = Field(
+        default=True, description="Включить глобальный rate limiting"
+    )
+    messages_per_minute: int = Field(
+        default=25, description="Максимальное количество сообщений в минуту на весь аккаунт"
+    )
+    messages_per_hour: int = Field(
+        default=500, description="Максимальное количество сообщений в час на весь аккаунт"
+    )
+
+
+class AdaptiveRateLimitingConfig(BaseSettings):
+    """Конфигурация адаптивного rate limiting."""
+
+    enabled: bool = Field(
+        default=True, description="Включить адаптивные лимиты"
+    )
+    reduction_on_floodwait_percent: int = Field(
+        default=20, description="Снижение лимитов на X% при получении FloodWait"
+    )
+    recovery_period_minutes: int = Field(
+        default=10, description="Период проверки восстановления лимитов (минуты)"
+    )
+    recovery_increment_percent: int = Field(
+        default=5, description="Восстановление лимитов на X% за период без FloodWait"
+    )
+
+
+class ChatTypeRateLimitsConfig(BaseSettings):
+    """Конфигурация лимитов по типам чатов."""
+
+    private: int = Field(
+        default=20, description="Сообщений в минуту для личных чатов"
+    )
+    group: int = Field(
+        default=10, description="Сообщений в минуту для групп"
+    )
+    channel: int = Field(
+        default=5, description="Сообщений в минуту для каналов"
+    )
+
+
 class RateLimitingConfig(BaseSettings):
     """Конфигурация rate limiting."""
 
@@ -161,6 +206,15 @@ class RateLimitingConfig(BaseSettings):
     )
     spam_detection: SpamDetectionConfig = Field(
         default_factory=SpamDetectionConfig, description="Настройки детекции спама"
+    )
+    global_limits: GlobalRateLimitingConfig = Field(
+        default_factory=GlobalRateLimitingConfig, description="Глобальные лимиты на уровне аккаунта"
+    )
+    adaptive: AdaptiveRateLimitingConfig = Field(
+        default_factory=AdaptiveRateLimitingConfig, description="Адаптивные лимиты"
+    )
+    chat_type_limits: ChatTypeRateLimitsConfig = Field(
+        default_factory=ChatTypeRateLimitsConfig, description="Лимиты по типам чатов"
     )
 
     model_config = SettingsConfigDict(env_prefix="RATE_LIMITING_")
@@ -315,6 +369,19 @@ class Config(BaseSettings):
         rate_limiting_data = yaml_data.get("rate_limiting", {})
         spam_detection_data = rate_limiting_data.get("spam_detection", {})
         rate_limiting_data["spam_detection"] = SpamDetectionConfig(**spam_detection_data)
+        
+        # Глобальные лимиты
+        global_limits_data = rate_limiting_data.get("global", {})
+        rate_limiting_data["global_limits"] = GlobalRateLimitingConfig(**global_limits_data)
+        
+        # Адаптивные лимиты
+        adaptive_data = rate_limiting_data.get("adaptive", {})
+        rate_limiting_data["adaptive"] = AdaptiveRateLimitingConfig(**adaptive_data)
+        
+        # Лимиты по типам чатов
+        chat_type_limits_data = rate_limiting_data.get("chat_type_limits", {})
+        rate_limiting_data["chat_type_limits"] = ChatTypeRateLimitsConfig(**chat_type_limits_data)
+        
         rate_limiting = RateLimitingConfig(**rate_limiting_data)
 
         # ASR server конфигурация

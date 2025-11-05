@@ -9,6 +9,7 @@ from typing import Optional
 
 import httpx
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 
 from .ai_client import AIClient
 from .calendar import GoogleCalendar
@@ -22,7 +23,7 @@ from .language_detector import (
 )
 from .memory import Memory
 from .rag import RAGSystem
-from .rate_limiter import RateLimiter
+from .rate_limiter import RateLimiter, GlobalRateLimiter
 from .sales_flow import SalesFlow, SalesStage
 from .slot_extractor import SlotExtractor
 from .tools import Tools
@@ -49,6 +50,7 @@ class TelegramUserClient:
         self.memory: Optional[Memory] = None
         self.calendar: Optional[GoogleCalendar] = None
         self.rate_limiter: Optional[RateLimiter] = None
+        self.global_rate_limiter: Optional[GlobalRateLimiter] = None
         self.voice_handler: Optional[VoiceHandler] = None
         self.sales_flow: Optional[SalesFlow] = None
         self.intent_classifier: Optional[IntentClassifier] = None
@@ -144,6 +146,19 @@ class TelegramUserClient:
             max_repeated_messages=self.config.rate_limiting.spam_detection.max_repeated_messages,
             min_message_length=self.config.rate_limiting.spam_detection.min_message_length,
             max_message_length=self.config.rate_limiting.spam_detection.max_message_length,
+        )
+
+        # Global Rate Limiter
+        self.global_rate_limiter = GlobalRateLimiter(
+            session_factory=self.memory.SessionLocal,
+            enabled=self.config.rate_limiting.global_limits.enabled,
+            messages_per_minute=self.config.rate_limiting.global_limits.messages_per_minute,
+            messages_per_hour=self.config.rate_limiting.global_limits.messages_per_hour,
+            block_duration_minutes=self.config.rate_limiting.block_duration_minutes,
+            adaptive_enabled=self.config.rate_limiting.adaptive.enabled,
+            reduction_on_floodwait_percent=self.config.rate_limiting.adaptive.reduction_on_floodwait_percent,
+            recovery_period_minutes=self.config.rate_limiting.adaptive.recovery_period_minutes,
+            recovery_increment_percent=self.config.rate_limiting.adaptive.recovery_increment_percent,
         )
 
         # Voice Handler (если включен)
@@ -428,10 +443,10 @@ class TelegramUserClient:
                             return
                         except Exception as e:
                             logger.error(f"Unexpected error transcribing voice message: {e}", exc_info=True)
-                            await event.reply("Извините, не удалось распознать голосовое сообщение. Попробуйте отправить текстом.")
+                            await self.safe_reply(event, "Извините, не удалось распознать голосовое сообщение. Попробуйте отправить текстом.")
                             return
                     else:
-                        await event.reply("Обработка голосовых сообщений отключена.")
+                        await self.safe_reply(event, "Обработка голосовых сообщений отключена.")
                         return
 
                 logger.info(
@@ -441,16 +456,39 @@ class TelegramUserClient:
                 logger.debug(f"Full message content: {message_text}")
                 logger.debug(f"Chat ID: {chat.id}, Chat type: {type(chat).__name__}")
 
-                # Проверка rate limit (только для текстовых сообщений)
+                # Проверка глобального лимита перед обработкой
+                if self.global_rate_limiter:
+                    global_allowed, global_reason = self.global_rate_limiter.check_global_limit()
+                    if not global_allowed:
+                        logger.warning(f"Global rate limit exceeded: {global_reason}")
+                        await self.safe_reply(event, global_reason)
+                        return
+
+                # Определяем тип чата для умных лимитов
+                chat_type = None
+                chat_type_limit = None
+                if event.is_private:
+                    chat_type = "private"
+                    chat_type_limit = self.config.rate_limiting.chat_type_limits.private
+                elif event.is_group:
+                    chat_type = "group"
+                    chat_type_limit = self.config.rate_limiting.chat_type_limits.group
+                elif event.is_channel:
+                    chat_type = "channel"
+                    chat_type_limit = self.config.rate_limiting.chat_type_limits.channel
+                
+                # Проверка rate limit с учетом типа чата (только для текстовых сообщений)
                 if message_text:
+                    # Используем лимит типа чата если он установлен, иначе базовый per-user лимит
+                    messages_per_minute = chat_type_limit if chat_type_limit else self.config.rate_limiting.messages_per_minute
                     allowed, reason = self.rate_limiter.check_rate_limit(
-                        sender.id, message_text
+                        sender.id, message_text, messages_per_minute=messages_per_minute
                     )
                     if not allowed:
                         logger.warning(
-                            f"Rate limit exceeded for user {sender.id}: {reason}"
+                            f"Rate limit exceeded for user {sender.id} (chat_type={chat_type}): {reason}"
                         )
-                        await event.reply(reason)
+                        await self.safe_reply(event, reason)
                         return
 
                 # Обработка команд Google Calendar
@@ -944,8 +982,12 @@ class TelegramUserClient:
                     logger.debug(f"Full AI response: {response}")
 
                     # Отправляем ответ
-                    await event.reply(response)
+                    await self.safe_reply(event, response)
                     logger.info(f"✅ Reply sent to user {sender.id}")
+                    
+                    # Записываем глобальное сообщение после успешной отправки
+                    if self.global_rate_limiter:
+                        self.global_rate_limiter.record_message()
 
                     # Сохраняем ответ ассистента
                     saved_response = self.memory.save_message(
@@ -1054,10 +1096,14 @@ class TelegramUserClient:
                                             except (json.JSONDecodeError, ValueError):
                                                 pass
                                         
-                                        await event.reply("✅ Встреча отменена.")
+                                        await self.safe_reply(event, "✅ Встреча отменена.")
+                                        if self.global_rate_limiter:
+                                            self.global_rate_limiter.record_message()
                                         logger.info(f"Event cancelled: {event_id} for user_id={sender.id}")
                                     else:
-                                        await event.reply("Не найдено запланированных встреч для отмены.")
+                                        await self.safe_reply(event, "Не найдено запланированных встреч для отмены.")
+                                        if self.global_rate_limiter:
+                                            self.global_rate_limiter.record_message()
                                 
                                 elif reschedule_type == "reschedule":
                                     # Перенос встречи
@@ -1195,17 +1241,23 @@ class TelegramUserClient:
                                         f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
                                     )
                                     # Отправляем пользователю сообщение с локальным временем
-                                    await event.reply(
+                                    await self.safe_reply(
+                                        event,
                                         f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!"
                                     )
+                                    if self.global_rate_limiter:
+                                        self.global_rate_limiter.record_message()
                                 else:
                                     # Предлагаем доступные слоты
                                     slots = self.calendar.suggest_available_slots()
                                     slots_text = "\n".join(f"• {slot}" for slot in slots)
-                                    await event.reply(
+                                    await self.safe_reply(
+                                        event,
                                         f"📅 Предлагаю следующие варианты времени:\n{slots_text}\n\n"
                                         "Напишите удобное время, и я создам встречу!"
                                     )
+                                    if self.global_rate_limiter:
+                                        self.global_rate_limiter.record_message()
                         except Exception as e:
                             logger.error(
                                 f"Error handling consultation request: {e}", exc_info=True
@@ -1249,6 +1301,64 @@ class TelegramUserClient:
 
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
+
+    async def safe_reply(self, event: events.NewMessage.Event, message: str, max_retries: int = 3):
+        """
+        Безопасная отправка ответа с обработкой FloodWait.
+
+        Args:
+            event: Событие сообщения
+            message: Текст сообщения для отправки
+            max_retries: Максимальное количество попыток
+        """
+        chat_type = None
+        if event.is_private:
+            chat_type = "private"
+        elif event.is_group:
+            chat_type = "group"
+        elif hasattr(event, "is_channel") and event.is_channel:
+            chat_type = "channel"
+
+        for attempt in range(max_retries):
+            try:
+                await event.reply(message)
+                logger.debug(f"Message sent successfully (attempt {attempt + 1})")
+                return
+            except FloodWaitError as e:
+                wait_seconds = e.seconds
+                logger.warning(
+                    f"FloodWait error: need to wait {wait_seconds} seconds (attempt {attempt + 1}/{max_retries})"
+                )
+                
+                # Записываем FloodWait в историю
+                if self.global_rate_limiter:
+                    self.global_rate_limiter.record_flood_wait(wait_seconds, chat_type)
+                
+                # Критическое предупреждение при длинном ожидании
+                if wait_seconds > 60:
+                    logger.critical(
+                        f"CRITICAL FloodWait: {wait_seconds} seconds! "
+                        f"This indicates potential account risk."
+                    )
+                
+                # Ждем указанное время + небольшая задержка для безопасности
+                import asyncio
+                await asyncio.sleep(wait_seconds + 1)
+                
+                # Если это последняя попытка, не продолжаем
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"Failed to send message after {max_retries} attempts due to FloodWait"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error sending message: {e}", exc_info=True)
+                if attempt == max_retries - 1:
+                    logger.error(f"Failed to send message after {max_retries} attempts")
+                    return
+                # Небольшая задержка перед повторной попыткой
+                import asyncio
+                await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка
 
     def _should_handle_message(self, event: events.NewMessage.Event) -> bool:
         """
@@ -1300,7 +1410,9 @@ class TelegramUserClient:
                         response += self.calendar.format_event(evt) + "\n"
                 else:
                     response = "📅 Нет предстоящих событий."
-                await event.reply(response)
+                await self.safe_reply(event, response)
+                if self.global_rate_limiter:
+                    self.global_rate_limiter.record_message()
                 return True
 
             # Команда /create_event - создать событие (простой формат)

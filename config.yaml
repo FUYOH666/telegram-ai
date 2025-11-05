@@ -190,6 +190,25 @@ rate_limiting:
     max_repeated_messages: 3
     min_message_length: 2
     max_message_length: 5000
+  
+  # Глобальные лимиты на уровне аккаунта
+  global:
+    enabled: true
+    messages_per_minute: 25  # безопасный запас от 30 (рекомендуемый лимит Telegram)
+    messages_per_hour: 500   # защита от массовой рассылки
+    
+  # Адаптивные лимиты
+  adaptive:
+    enabled: true
+    reduction_on_floodwait_percent: 20  # снижение на 20% при FloodWait
+    recovery_period_minutes: 10  # проверка восстановления каждые 10 минут
+    recovery_increment_percent: 5  # восстановление на 5% за период
+    
+  # Лимиты по типам чатов
+  chat_type_limits:
+    private: 20  # сообщений/минуту для личных чатов
+    group: 10    # сообщений/минуту для групп
+    channel: 5   # сообщений/минуту для каналов
 
 asr_server:
   base_url: http://100.93.82.48:8001

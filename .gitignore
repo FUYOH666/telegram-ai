@@ -64,4 +64,4 @@ temp_audio/
 Thumbs.db
 
 # uv
-uv.lock
+# uv.lock - НЕ игнорируем! Это источник истины для зависимостей (P0)
