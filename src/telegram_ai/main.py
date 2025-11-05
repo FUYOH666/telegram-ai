@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -41,6 +42,32 @@ async def main():
 
         # Валидируем конфигурацию
         config.validate()
+
+        # Проверяем, не запущен ли уже другой экземпляр
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["ps", "aux"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if result.returncode == 0:
+                # Ищем процессы, связанные с telegram-ai, но исключаем текущий процесс
+                lines = result.stdout.split("\n")
+                telegram_ai_processes = [
+                    line for line in lines
+                    if "telegram-ai" in line.lower() or "src.telegram_ai.main" in line
+                    if str(os.getpid()) not in line  # Исключаем текущий процесс
+                ]
+                if len(telegram_ai_processes) > 0:
+                    logger.warning(
+                        f"Found {len(telegram_ai_processes)} potentially running instance(s). "
+                        "If you get 'database is locked' error, stop other instances first."
+                    )
+        except Exception as e:
+            # Игнорируем ошибки проверки процессов (может не работать на всех системах)
+            logger.debug(f"Could not check for running instances: {e}")
 
         logger.info("Starting Telegram AI Assistant...")
 

@@ -1456,14 +1456,37 @@ class TelegramUserClient:
         """Остановить клиент."""
         logger.info("Stopping client...")
 
+        # Закрываем компоненты в правильном порядке
+        # Сначала закрываем AI клиент и voice handler
         if self.ai_client:
             await self.ai_client.close()
 
         if self.voice_handler:
             await self.voice_handler.close()
 
+        # Закрываем базу данных перед закрытием Telethon клиента
+        # Это предотвращает блокировки SQLite при сохранении состояния сессии
+        if self.memory:
+            try:
+                self.memory.close()
+            except Exception as e:
+                logger.warning(f"Error closing memory: {e}", exc_info=True)
+
+        # Закрываем Telethon клиент в последнюю очередь
+        # Telethon пытается сохранить состояние в SQLite сессию, поэтому важно
+        # закрыть все другие соединения с SQLite перед этим
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except Exception as e:
+                # Игнорируем ошибки "database is locked" при закрытии
+                # так как они не критичны и не влияют на работу приложения
+                if "database is locked" in str(e).lower():
+                    logger.warning(
+                        f"Database locked during disconnect (non-critical): {e}"
+                    )
+                else:
+                    logger.error(f"Error disconnecting Telegram client: {e}", exc_info=True)
 
         logger.info("Client stopped")
 

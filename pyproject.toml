@@ -1,6 +1,6 @@
 [project]
 name = "telegram-ai"
-version = "0.5.0"
+version = "0.5.1"
 description = "Personal AI assistant for Telegram personal account with local AI server integration"
 readme = "README.md"
 authors = [

@@ -740,3 +740,14 @@ class Memory:
         finally:
             session.close()
 
+    def close(self):
+        """
+        Закрыть соединения с базой данных.
+        
+        Этот метод должен вызываться при остановке приложения для корректного
+        освобождения ресурсов и предотвращения блокировок базы данных.
+        """
+        if hasattr(self, "engine") and self.engine:
+            self.engine.dispose()
+            logger.info("Memory database connections closed")
+
