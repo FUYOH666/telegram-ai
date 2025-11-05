@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
+import httpx
 
 from .ai_client import AIClient
 from .calendar import GoogleCalendar
@@ -186,6 +188,7 @@ class TelegramUserClient:
                 if event.message.voice or event.message.audio:
                     if self.voice_handler and self.voice_handler.enabled:
                         try:
+                            transcription_start = time.time()
                             logger.info(f"🎤 Voice message received from {sender.id}")
                             # Скачиваем аудио файл
                             audio_path = await event.message.download_media(file="./temp_audio/")
@@ -203,7 +206,8 @@ class TelegramUserClient:
                             transcribed_text = await self.voice_handler.transcribe_voice(
                                 audio_path, language="ru"
                             )
-                            logger.info(f"✅ Transcribed: {transcribed_text[:100]}...")
+                            transcription_time = time.time() - transcription_start
+                            logger.info(f"✅ Transcribed in {transcription_time:.2f}s: {transcribed_text[:100]}...")
 
                             # Используем транскрипт как текст сообщения
                             message_text = transcribed_text
@@ -214,6 +218,14 @@ class TelegramUserClient:
                             except Exception as e:
                                 logger.warning(f"Failed to delete temp audio file: {e}")
 
+                        except httpx.TimeoutException as e:
+                            logger.error(f"Timeout transcribing voice message: {e}", exc_info=True)
+                            await event.reply("⏱️ Таймаут при распознавании голосового сообщения. Попробуйте позже или отправьте текстом.")
+                            return
+                        except httpx.ReadTimeout as e:
+                            logger.error(f"Read timeout transcribing voice message: {e}", exc_info=True)
+                            await event.reply("⏱️ Сервер ASR не отвечает вовремя. Попробуйте позже или отправьте текстом.")
+                            return
                         except Exception as e:
                             logger.error(f"Error transcribing voice message: {e}", exc_info=True)
                             await event.reply("Извините, не удалось распознать голосовое сообщение. Попробуйте отправить текстом.")
@@ -263,13 +275,20 @@ class TelegramUserClient:
                 # Получаем контекст
                 context = self.memory.get_context(sender.id)
 
+                # Определяем, является ли это первым сообщением в разговоре
+                is_first_message = len(context) <= 1  # Только системное сообщение или его нет
+
                 # Работа со скриптом продаж
                 user_context_data = self.memory.get_user_context(sender.id)
+                max_response_length = None
+                
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
                     
                     # Определяем переход на следующий этап
-                    new_stage = self.sales_flow.detect_stage_transition(message_text, current_stage)
+                    new_stage = self.sales_flow.detect_stage_transition(
+                        message_text, current_stage, is_first_message=is_first_message
+                    )
                     if new_stage:
                         logger.info(f"Sales flow: {current_stage.value} -> {new_stage.value}")
                         user_context_data = self.sales_flow.update_stage(user_context_data, new_stage)
@@ -297,11 +316,18 @@ class TelegramUserClient:
                             modified_context.insert(0, {"role": "system", "content": stage_modifier})
                         context = modified_context
 
+                    # Получаем максимальную длину ответа для текущего этапа
+                    max_response_length = self.sales_flow.get_stage_max_length(current_stage)
+
                 # Генерируем ответ через AI
                 try:
+                    ai_request_start = time.time()
                     logger.info(f"🤖 Sending {len(context)} messages to AI server...")
-                    response = await self.ai_client.get_response(context)
-                    logger.info(f"✅ AI response received ({len(response)} chars): {response[:150]}...")
+                    response = await self.ai_client.get_response(
+                        context, max_response_length=max_response_length
+                    )
+                    ai_request_time = time.time() - ai_request_start
+                    logger.info(f"✅ AI response received in {ai_request_time:.2f}s ({len(response)} chars): {response[:150]}...")
                     logger.debug(f"Full AI response: {response}")
 
                     # Отправляем ответ
@@ -362,16 +388,34 @@ class TelegramUserClient:
                                 f"Error creating consultation event: {e}", exc_info=True
                             )
 
+                except httpx.TimeoutException as e:
+                    logger.error(f"Timeout connecting to AI server: {e}", exc_info=True)
+                    await event.reply("⏱️ Таймаут подключения к AI серверу. Сервер недоступен или перегружен. Попробуйте позже.")
+                except httpx.ReadTimeout as e:
+                    logger.error(f"Read timeout from AI server: {e}", exc_info=True)
+                    await event.reply("⏱️ AI сервер не успел сгенерировать ответ за отведенное время. Попробуйте позже или переформулируйте запрос.")
+                except httpx.NetworkError as e:
+                    logger.error(f"Network error: {e}", exc_info=True)
+                    await event.reply("🌐 Ошибка сети при подключении к AI серверу. Проверьте интернет-соединение.")
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"HTTP error from AI server: {e.response.status_code} - {e.response.text}", exc_info=True)
+                    if e.response.status_code == 404:
+                        user_error = "❌ Ошибка подключения к AI серверу. Проверьте настройки (URL и модель)."
+                    elif e.response.status_code >= 500:
+                        user_error = "🔧 Ошибка на стороне AI сервера. Попробуйте позже."
+                    else:
+                        user_error = f"❌ Ошибка AI сервера (код {e.response.status_code}). Попробуйте позже."
+                    await event.reply(user_error)
                 except Exception as e:
                     logger.error(f"Error getting AI response: {e}", exc_info=True)
                     error_msg = str(e)
                     # Более информативное сообщение об ошибке
                     if "404" in error_msg or "Not Found" in error_msg:
-                        user_error = "Ошибка подключения к AI серверу. Проверьте настройки."
-                    elif "timeout" in error_msg.lower():
-                        user_error = "AI сервер не отвечает. Попробуйте позже."
+                        user_error = "❌ Ошибка подключения к AI серверу. Проверьте настройки."
+                    elif "timeout" in error_msg.lower() or "Timeout" in error_msg:
+                        user_error = "⏱️ Таймаут при генерации ответа. Попробуйте позже."
                     else:
-                        user_error = f"Ошибка при генерации ответа: {error_msg[:100]}"
+                        user_error = f"❌ Ошибка при генерации ответа: {error_msg[:100]}"
                     
                     await event.reply(user_error)
 

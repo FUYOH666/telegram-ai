@@ -94,10 +94,11 @@ class Memory:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Создаем engine и сессию
+        # timeout=5.0 позволяет автоматически разблокировать базу при кратковременных блокировках
         self.engine = create_engine(
             f"sqlite:///{self.db_path}",
             echo=False,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 5.0},
         )
         self.SessionLocal = sessionmaker(bind=self.engine)
 

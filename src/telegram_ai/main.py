@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+import sqlite3
 from pathlib import Path
 from datetime import datetime
 
@@ -51,6 +52,28 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         sys.exit(0)
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            logger.error(
+                "Database is locked. This usually means:\n"
+                "  1. Another instance of the application is already running\n"
+                "  2. A previous instance didn't close properly\n"
+                "\n"
+                "Solutions:\n"
+                "  - Check if another instance is running: ps aux | grep telegram-ai\n"
+                "  - Kill the other instance: kill <PID>\n"
+                "  - Or wait a few seconds and try again"
+            )
+            print(
+                "\n❌ Ошибка: База данных заблокирована.\n"
+                "   Вероятно, уже запущен другой экземпляр приложения.\n"
+                "   Проверьте: ps aux | grep telegram-ai\n"
+                "   Или подождите несколько секунд и попробуйте снова.\n"
+            )
+        else:
+            logger.error(f"SQLite error: {e}", exc_info=True)
+            print(f"\n❌ Ошибка базы данных: {e}\n")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)

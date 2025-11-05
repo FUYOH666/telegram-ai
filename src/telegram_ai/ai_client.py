@@ -1,6 +1,8 @@
 """Клиент для подключения к локальному AI-серверу (OpenAI-compatible API)."""
 
 import logging
+import re
+import time
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
@@ -11,9 +13,13 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
+    retry_unless_exception_type,
+    retry_any,
 )
 
 logger = logging.getLogger(__name__)
+
+
 
 
 class AIClient:
@@ -58,14 +64,23 @@ class AIClient:
         self.timezone_name = timezone_name
         self.date_format = date_format or "%d %B %Y года, %A, %H:%M (МСК)"
 
+        # Настраиваем таймауты: отдельно для подключения и чтения
+        # httpx.Timeout требует либо default, либо все четыре параметра (connect, read, write, pool)
+        timeout_config = httpx.Timeout(
+            connect=15.0,  # Таймаут подключения: 15 секунд
+            read=float(timeout),  # Таймаут чтения: настраиваемый через config (в секундах)
+            write=10.0,  # Таймаут записи: 10 секунд
+            pool=10.0,  # Таймаут пула соединений: 10 секунд
+        )
         self.client = httpx.AsyncClient(
-            timeout=timeout,
+            timeout=timeout_config,
             headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
         )
 
         logger.info(
             f"AI Client initialized: base_url={self.base_url}, "
-            f"model={self.model}, max_tokens={self.max_tokens}, timezone={timezone_name}"
+            f"model={self.model}, max_tokens={self.max_tokens}, timezone={timezone_name}, "
+            f"timeouts(connect=15.0s, read={timeout}s, write=10.0s, pool=10.0s), max_retries={max_retries}"
         )
 
     def _get_dynamic_system_prompt(self) -> str:
@@ -131,15 +146,21 @@ class AIClient:
             return date_info
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        # Ретраи при TimeoutException и NetworkError, НО НЕ при ReadTimeout
+        # ReadTimeout означает, что сервер обрабатывает запрос, но слишком медленно - ретрай не поможет
+        retry=retry_any(
+            retry_if_exception_type(httpx.NetworkError),
+            retry_if_exception_type(httpx.TimeoutException) & retry_unless_exception_type(httpx.ReadTimeout)
+        ),
         reraise=True,
     )
     async def get_response(
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
+        max_response_length: Optional[int] = None,
     ) -> str:
         """
         Получить ответ от AI-сервера.
@@ -148,9 +169,10 @@ class AIClient:
             messages: Список сообщений в формате OpenAI API
                 [{"role": "user", "content": "текст"}, ...]
             temperature: Температура генерации (0.0-1.0)
+            max_response_length: Максимальная длина ответа в символах (опционально)
 
         Returns:
-            Ответ от AI-сервера
+            Ответ от AI-сервера (обрезанный до max_response_length если указано)
 
         Raises:
             httpx.HTTPError: При ошибке HTTP запроса
@@ -173,8 +195,10 @@ class AIClient:
             "max_tokens": self.max_tokens,
         }
 
+        request_start_time = time.time()
+        
         try:
-            logger.debug(f"Sending request to {url} with {len(messages)} messages")
+            logger.debug(f"Sending request to {url} with {len(final_messages)} messages (timeout={self.timeout}s)")
             response = await self.client.post(url, json=payload)
             response.raise_for_status()
 
@@ -184,22 +208,161 @@ class AIClient:
                 raise ValueError("Invalid response format: missing choices")
 
             content = data["choices"][0]["message"]["content"]
-            logger.debug(f"Received response: {content[:100]}...")
+            request_time = time.time() - request_start_time
+            logger.debug(f"Received response in {request_time:.2f}s: {content[:100]}...")
+
+            # Обрезаем ответ если указана максимальная длина
+            if max_response_length and len(content) > max_response_length:
+                original_length = len(content)
+                content = self._truncate_response(content, max_response_length)
+                logger.debug(
+                    f"Response truncated from {original_length} to {len(content)} characters"
+                )
+
+            # Улучшаем форматирование ответа
+            content = self._format_response(content)
 
             return content
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from AI server: {e.response.status_code} - {e.response.text}")
+            request_time = time.time() - request_start_time
+            logger.error(
+                f"HTTP error from AI server after {request_time:.2f}s: "
+                f"{e.response.status_code} - {e.response.text}"
+            )
+            raise
+        except httpx.ReadTimeout as e:
+            # ReadTimeout должен обрабатываться ДО TimeoutException, так как он является подклассом
+            request_time = time.time() - request_start_time
+            logger.error(
+                f"Read timeout from AI server after {request_time:.2f}s (server took longer than {self.timeout}s to respond): {e}. "
+                f"Not retrying - server is processing but too slow."
+            )
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout connecting to AI server: {e}")
+            # TimeoutException для проблем подключения (не ReadTimeout)
+            request_time = time.time() - request_start_time
+            logger.error(
+                f"Timeout connecting to AI server after {request_time:.2f}s: {e}. "
+                f"Will retry if connection can be established."
+            )
             raise
         except httpx.NetworkError as e:
-            logger.error(f"Network error: {e}")
+            request_time = time.time() - request_start_time
+            logger.error(
+                f"Network error after {request_time:.2f}s: {e}. "
+                f"Will retry if connection can be established."
+            )
             raise
         except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"Invalid response format: {e}")
+            request_time = time.time() - request_start_time
+            logger.error(f"Invalid response format after {request_time:.2f}s: {e}")
             raise ValueError(f"Invalid response format: {e}") from e
+
+    def _format_response(self, text: str) -> str:
+        """
+        Улучшить форматирование ответа для лучшей читаемости.
+
+        Args:
+            text: Текст ответа
+
+        Returns:
+            Отформатированный текст
+        """
+        if not text:
+            return text
+
+        # Если текст уже хорошо отформатирован (есть пустые строки), возвращаем как есть
+        if "\n\n" in text:
+            # Текст уже имеет разбивку на абзацы, но можем улучшить
+            lines = text.split("\n")
+            formatted_lines = []
+            for line in lines:
+                line = line.strip()
+                if line:
+                    formatted_lines.append(line)
+                elif formatted_lines and formatted_lines[-1] != "":
+                    # Добавляем пустую строку только если предыдущая не пустая
+                    formatted_lines.append("")
+            
+            result = "\n".join(formatted_lines).strip()
+            return result
+
+        # Если текст длинный без разрывов (больше 200 символов), разбиваем на абзацы
+        if len(text) > 200 and "\n" not in text:
+            # Пытаемся разбить по предложениям
+            sentences = re.split(r'([.!?]\s+)', text)
+            paragraphs = []
+            current_paragraph = ""
+            
+            for i in range(0, len(sentences), 2):
+                if i + 1 < len(sentences):
+                    sentence = sentences[i] + sentences[i + 1]
+                else:
+                    sentence = sentences[i]
+                
+                # Если текущий абзац + предложение больше 200 символов, начинаем новый абзац
+                if current_paragraph and len(current_paragraph + sentence) > 200:
+                    paragraphs.append(current_paragraph.strip())
+                    current_paragraph = sentence
+                else:
+                    current_paragraph += sentence
+            
+            if current_paragraph:
+                paragraphs.append(current_paragraph.strip())
+            
+            # Объединяем абзацы с пустыми строками между ними
+            if len(paragraphs) > 1:
+                return "\n\n".join(paragraphs)
+        
+        # Если текст короткий или уже с разрывами, возвращаем как есть
+        return text.strip()
+
+    def _truncate_response(self, text: str, max_length: int) -> str:
+        """
+        Обрезать ответ до максимальной длины, сохраняя целостность предложений.
+
+        Args:
+            text: Текст ответа
+            max_length: Максимальная длина в символах
+
+        Returns:
+            Обрезанный текст
+        """
+        if len(text) <= max_length:
+            return text
+
+        # Пытаемся обрезать по предложениям
+        # Находим последнее полное предложение, которое помещается в лимит
+        sentences = re.split(r'([.!?]\s+)', text)
+        result = ""
+        
+        for i in range(0, len(sentences), 2):
+            if i + 1 < len(sentences):
+                sentence = sentences[i] + sentences[i + 1]
+            else:
+                sentence = sentences[i]
+            
+            if len(result + sentence) <= max_length:
+                result += sentence
+            else:
+                break
+        
+        # Если не получилось обрезать по предложениям, обрезаем по словам
+        if not result or len(result) < max_length * 0.5:
+            words = text.split()
+            result = ""
+            for word in words:
+                if len(result + " " + word) <= max_length:
+                    result += (" " + word) if result else word
+                else:
+                    break
+            
+            # Добавляем многоточие если текст был обрезан
+            if result != text:
+                result = result.rstrip() + "..."
+        
+        return result
 
     async def close(self):
         """Закрыть HTTP клиент."""

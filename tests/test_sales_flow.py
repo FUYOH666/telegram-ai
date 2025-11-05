@@ -117,3 +117,29 @@ def test_sales_flow_disabled(sales_flow):
     new_stage = sales_flow.detect_stage_transition(message, current_stage)
     assert new_stage is None
 
+
+def test_sales_flow_first_message_greeting(sales_flow):
+    """Тест определения приветствия для первого сообщения."""
+    message = "Привет"
+    current_stage = SalesStage.NEEDS_DISCOVERY  # Даже если текущий этап другой
+    
+    # При первом сообщении должно вернуться GREETING
+    new_stage = sales_flow.detect_stage_transition(message, current_stage, is_first_message=True)
+    assert new_stage == SalesStage.GREETING
+
+
+def test_sales_flow_get_stage_max_length(sales_flow):
+    """Тест получения максимальной длины ответа для этапа."""
+    max_length = sales_flow.get_stage_max_length(SalesStage.GREETING)
+    assert max_length == 150
+    
+    max_length = sales_flow.get_stage_max_length(SalesStage.PRESENTATION)
+    assert max_length == 500
+    
+    # Для несуществующего этапа должно вернуться None
+    from telegram_ai.sales_flow import SalesStage as SS
+    # Проверяем что метод работает для всех этапов
+    for stage in SS:
+        max_len = sales_flow.get_stage_max_length(stage)
+        assert max_len is not None or stage not in [SS.GREETING, SS.NEEDS_DISCOVERY, SS.PRESENTATION, SS.OBJECTIONS, SS.CONSULTATION_OFFER, SS.SCHEDULING]
+
