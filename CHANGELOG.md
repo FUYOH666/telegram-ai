@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2025-11-05
+
+### Changed
+
+- **Подготовка к production деплою** - очистка проекта от временных файлов и данных
+  - Удалены временные MD-файлы (PROJECT_SUMMARY.md, SIMILAR_PROJECTS_ANALYSIS.md, rm.md, telegram-ai-assistant-setup.plan.md)
+  - Удалены временные скрипты (clear_user_data.py, test_ai_connection.py)
+  - Очищена база данных от тестовых данных (55 сообщений, 2 разговора)
+  - Очищены логи от тестовых записей
+  - Проект готов к production запуску
+
 ## [0.4.0] - 2025-11-05
 
 ### Added
