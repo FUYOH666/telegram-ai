@@ -5,12 +5,14 @@
 ## Быстрый старт
 
 ```bash
-# Одна команда для запуска (из любого места в терминале):
-cd /path/to/TelegramAI && uv sync && uv run telegram-ai
-
-# Пример для стандартного пути:
+# Одна команда для запуска (замените путь на ваш реальный путь к проекту):
 cd ~/development/TelegramAI && uv sync && uv run telegram-ai
+
+# Или если проект в другом месте:
+cd /Users/ваше_имя/путь/к/TelegramAI && uv sync && uv run telegram-ai
 ```
+
+**Примечание:** Замените `~/development/TelegramAI` на реальный путь к директории проекта.
 
 ## Требования
 
