@@ -253,6 +253,10 @@ async def health_check():
                 enabled=True,
                 messages_per_minute=config.rate_limiting.global_limits.messages_per_minute,
                 messages_per_hour=config.rate_limiting.global_limits.messages_per_hour,
+                adaptive_enabled=config.rate_limiting.adaptive.enabled,
+                reduction_on_floodwait_percent=config.rate_limiting.adaptive.reduction_on_floodwait_percent,
+                recovery_period_minutes=config.rate_limiting.adaptive.recovery_period_minutes,
+                recovery_increment_percent=config.rate_limiting.adaptive.recovery_increment_percent,
             )
             flood_stats = global_limiter.get_flood_wait_stats(hours=24)
             if flood_stats["count"] > 0:
@@ -264,10 +268,19 @@ async def health_check():
             else:
                 checks.append("✅ FloodWait за 24ч: нет событий")
             
-            checks.append(
-                f"ℹ️  Глобальные лимиты: {config.rate_limiting.global_limits.messages_per_minute}/мин, "
-                f"{config.rate_limiting.global_limits.messages_per_hour}/час"
-            )
+            # Показываем базовые и текущие адаптивные лимиты
+            base_msg = f"ℹ️  Базовые глобальные лимиты: {config.rate_limiting.global_limits.messages_per_minute}/мин, {config.rate_limiting.global_limits.messages_per_hour}/час"
+            if config.rate_limiting.adaptive.enabled:
+                current_minute = global_limiter.messages_per_minute
+                current_hour = global_limiter.messages_per_hour
+                checks.append(base_msg)
+                checks.append(
+                    f"ℹ️  Текущие адаптивные лимиты: {current_minute}/мин, {current_hour}/час "
+                    f"({'снижены' if current_minute < config.rate_limiting.global_limits.messages_per_minute else 'базовые'})"
+                )
+            else:
+                checks.append(base_msg)
+            
             checks.append(
                 f"ℹ️  Адаптивные лимиты: {'включены' if config.rate_limiting.adaptive.enabled else 'отключены'}"
             )

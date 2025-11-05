@@ -182,9 +182,9 @@ google_calendar:
 
 rate_limiting:
   enabled: true
-  messages_per_minute: 10
-  messages_per_hour: 50
-  min_interval_seconds: 2
+  messages_per_minute: 15  # ⬆️ увеличено с 10 до 15 для более активного общения
+  messages_per_hour: 80    # ⬆️ увеличено с 50 до 80
+  min_interval_seconds: 1  # ⬇️ уменьшено с 2 до 1 секунды (быстрее ответы)
   block_duration_minutes: 10
   spam_detection:
     max_repeated_messages: 3
@@ -194,21 +194,21 @@ rate_limiting:
   # Глобальные лимиты на уровне аккаунта
   global:
     enabled: true
-    messages_per_minute: 25  # безопасный запас от 30 (рекомендуемый лимит Telegram)
-    messages_per_hour: 500   # защита от массовой рассылки
+    messages_per_minute: 28  # ⬆️ увеличено с 25 до 28 (ближе к безопасному максимуму 30)
+    messages_per_hour: 600  # ⬆️ увеличено с 500 до 600
     
-  # Адаптивные лимиты
+  # Адаптивные лимиты (автоматически защитят от блокировок)
   adaptive:
     enabled: true
     reduction_on_floodwait_percent: 20  # снижение на 20% при FloodWait
-    recovery_period_minutes: 10  # проверка восстановления каждые 10 минут
-    recovery_increment_percent: 5  # восстановление на 5% за период
+    recovery_period_minutes: 5  # ⬇️ уменьшено с 10 до 5 минут (быстрее восстановление)
+    recovery_increment_percent: 10  # ⬆️ увеличено с 5% до 10% (быстрее расширение при отсутствии проблем)
     
   # Лимиты по типам чатов
   chat_type_limits:
-    private: 20  # сообщений/минуту для личных чатов
-    group: 10    # сообщений/минуту для групп
-    channel: 5   # сообщений/минуту для каналов
+    private: 25  # ⬆️ увеличено с 20 до 25 для более активного общения в личных чатах
+    group: 12    # ⬆️ немного увеличено с 10 до 12
+    channel: 5   # оставлено консервативным (каналы редко требуют частых сообщений)
 
 asr_server:
   base_url: http://100.93.82.48:8001

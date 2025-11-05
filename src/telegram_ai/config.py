@@ -366,20 +366,20 @@ class Config(BaseSettings):
         google_calendar = GoogleCalendarConfig(**google_cal_data)
 
         # Rate limiting конфигурация
-        rate_limiting_data = yaml_data.get("rate_limiting", {})
-        spam_detection_data = rate_limiting_data.get("spam_detection", {})
+        rate_limiting_data = yaml_data.get("rate_limiting", {}).copy()  # Копируем чтобы не изменять оригинал
+        spam_detection_data = rate_limiting_data.pop("spam_detection", {})
         rate_limiting_data["spam_detection"] = SpamDetectionConfig(**spam_detection_data)
         
-        # Глобальные лимиты
-        global_limits_data = rate_limiting_data.get("global", {})
+        # Глобальные лимиты (удаляем "global" из данных, так как это зарезервированное слово)
+        global_limits_data = rate_limiting_data.pop("global", {})
         rate_limiting_data["global_limits"] = GlobalRateLimitingConfig(**global_limits_data)
         
         # Адаптивные лимиты
-        adaptive_data = rate_limiting_data.get("adaptive", {})
+        adaptive_data = rate_limiting_data.pop("adaptive", {})
         rate_limiting_data["adaptive"] = AdaptiveRateLimitingConfig(**adaptive_data)
         
         # Лимиты по типам чатов
-        chat_type_limits_data = rate_limiting_data.get("chat_type_limits", {})
+        chat_type_limits_data = rate_limiting_data.pop("chat_type_limits", {})
         rate_limiting_data["chat_type_limits"] = ChatTypeRateLimitsConfig(**chat_type_limits_data)
         
         rate_limiting = RateLimitingConfig(**rate_limiting_data)

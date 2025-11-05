@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -789,7 +789,7 @@ class GoogleCalendar:
                 extracted_time = self.timezone.localize(
                     datetime.combine(target_date + timedelta(days=1), time(extracted_hour, extracted_minute))
                 )
-                logger.debug(f"Time already passed today, moving to tomorrow")
+                logger.debug("Time already passed today, moving to tomorrow")
             
             logger.debug(
                 f"Extracted time from message: {extracted_time} "
