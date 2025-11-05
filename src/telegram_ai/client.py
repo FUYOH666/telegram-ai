@@ -154,7 +154,7 @@ class TelegramUserClient:
             enabled=self.config.rate_limiting.global_limits.enabled,
             messages_per_minute=self.config.rate_limiting.global_limits.messages_per_minute,
             messages_per_hour=self.config.rate_limiting.global_limits.messages_per_hour,
-            block_duration_minutes=self.config.rate_limiting.block_duration_minutes,
+            block_duration_minutes=self.config.rate_limiting.block_duration_minutes,  # Используется для глобальных блокировок
             adaptive_enabled=self.config.rate_limiting.adaptive.enabled,
             reduction_on_floodwait_percent=self.config.rate_limiting.adaptive.reduction_on_floodwait_percent,
             recovery_period_minutes=self.config.rate_limiting.adaptive.recovery_period_minutes,

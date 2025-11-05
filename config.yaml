@@ -185,7 +185,7 @@ rate_limiting:
   messages_per_minute: 15  # ⬆️ увеличено с 10 до 15 для более активного общения
   messages_per_hour: 80    # ⬆️ увеличено с 50 до 80
   min_interval_seconds: 1  # ⬇️ уменьшено с 2 до 1 секунды (быстрее ответы)
-  block_duration_minutes: 10
+  block_duration_minutes: 3  # ⬇️ уменьшено с 10 до 3 минут (быстрее разблокировка)
   spam_detection:
     max_repeated_messages: 3
     min_message_length: 2
