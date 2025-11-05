@@ -96,9 +96,26 @@ GOOGLE_CALENDAR_ENABLED=false
 
 **Защита от флуда (Rate Limiting):**
 - `rate_limiting.enabled` - включить защиту от флуда (по умолчанию: `true`)
-- `rate_limiting.messages_per_minute` - максимум сообщений в минуту (по умолчанию: 10)
-- `rate_limiting.messages_per_hour` - максимум сообщений в час (по умолчанию: 50)
-- `rate_limiting.block_duration_minutes` - длительность блокировки при превышении (по умолчанию: 10 минут)
+- `rate_limiting.messages_per_minute` - максимум сообщений в минуту на пользователя (по умолчанию: `10`)
+- `rate_limiting.messages_per_hour` - максимум сообщений в час на пользователя (по умолчанию: `50`)
+- `rate_limiting.min_interval_seconds` - минимальный интервал между сообщениями (по умолчанию: `2 секунды`)
+- `rate_limiting.block_duration_minutes` - длительность блокировки при превышении (по умолчанию: `10 минут`)
+
+**Глобальные лимиты на уровне аккаунта:**
+- `rate_limiting.global.enabled` - включить глобальный rate limiting (по умолчанию: `true`)
+- `rate_limiting.global.messages_per_minute` - максимум сообщений в минуту на весь аккаунт (по умолчанию: `25`)
+- `rate_limiting.global.messages_per_hour` - максимум сообщений в час на весь аккаунт (по умолчанию: `500`)
+
+**Адаптивные лимиты:**
+- `rate_limiting.adaptive.enabled` - включить адаптивные лимиты (по умолчанию: `true`)
+- `rate_limiting.adaptive.reduction_on_floodwait_percent` - снижение лимитов при FloodWait (по умолчанию: `20%`)
+- `rate_limiting.adaptive.recovery_period_minutes` - период проверки восстановления (по умолчанию: `10 минут`)
+- `rate_limiting.adaptive.recovery_increment_percent` - восстановление лимитов за период (по умолчанию: `5%`)
+
+**Лимиты по типам чатов:**
+- `rate_limiting.chat_type_limits.private` - сообщений в минуту для личных чатов (по умолчанию: `20`)
+- `rate_limiting.chat_type_limits.group` - сообщений в минуту для групп (по умолчанию: `10`)
+- `rate_limiting.chat_type_limits.channel` - сообщений в минуту для каналов (по умолчанию: `5`)
 
 **ASR сервер (голосовые сообщения):**
 - `asr_server.base_url` - URL ASR сервера (по умолчанию: `http://100.93.82.48:8001`)
