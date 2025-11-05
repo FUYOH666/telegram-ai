@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 LANGUAGE_NAMES = {
     "ru": "русском",
     "en": "английском",
-    "zh": "китайском",
+    "zh": "упрощенном китайском (Simplified Chinese)",
     "th": "тайском",
 }
 

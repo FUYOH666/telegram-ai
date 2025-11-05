@@ -510,7 +510,10 @@ class TelegramUserClient:
                         
                         # Добавляем инструкцию о языке ответа
                         language_instruction = ""
-                        if response_lang and response_lang != "ru":
+                        if response_lang == "zh":
+                            # Специальная инструкция для китайского - упрощенный китайский
+                            language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
+                        elif response_lang and response_lang != "ru":
                             lang_name = get_language_name(response_lang)
                             language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
                         elif response_lang == "ru":
@@ -518,32 +521,63 @@ class TelegramUserClient:
                         
                         # Добавляем модификатор как системное сообщение
                         modified_context = context.copy()
+                        # Для китайского языка инструкция должна быть первой (максимальный приоритет)
+                        if response_lang == "zh" and language_instruction:
+                            full_modifier = language_instruction + "\n\n" + stage_modifier + length_info + slot_prompt_addition
+                        else:
+                            full_modifier = stage_modifier + length_info + language_instruction + slot_prompt_addition
+                        
                         # Обновляем или добавляем системное сообщение
                         system_found = False
                         for msg in modified_context:
                             if msg.get("role") == "system":
-                                full_modifier = stage_modifier + length_info + language_instruction + slot_prompt_addition
                                 msg["content"] = full_modifier + "\n\n" + msg.get("content", "")
                                 system_found = True
                                 break
                         if not system_found:
-                            full_modifier = stage_modifier + length_info + language_instruction + slot_prompt_addition
                             modified_context.insert(0, {"role": "system", "content": full_modifier})
                         context = modified_context
                     elif response_lang and response_lang != "ru" and context:
                         # Если нет stage_modifier, но язык не русский - добавляем инструкцию о языке
-                        lang_name = get_language_name(response_lang)
-                        language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
+                        if response_lang == "zh":
+                            # Специальная инструкция для китайского - упрощенный китайский
+                            language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
+                        else:
+                            lang_name = get_language_name(response_lang)
+                            language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
                         modified_context = context.copy()
                         system_found = False
                         for msg in modified_context:
                             if msg.get("role") == "system":
-                                msg["content"] = language_instruction + "\n\n" + msg.get("content", "")
+                                # Для китайского языка инструкция должна быть первой (максимальный приоритет)
+                                if response_lang == "zh":
+                                    msg["content"] = language_instruction + "\n\n" + msg.get("content", "")
+                                else:
+                                    msg["content"] = language_instruction + "\n\n" + msg.get("content", "")
                                 system_found = True
                                 break
                         if not system_found:
                             modified_context.insert(0, {"role": "system", "content": language_instruction})
                         context = modified_context
+                    
+                    # ВАЖНО: Для китайского языка проверяем, что инструкция добавлена (fallback на случай если пропустили выше)
+                    if response_lang == "zh":
+                        chinese_instruction_text = "упрощенном китайском"
+                        has_chinese_instruction = any(
+                            msg.get("role") == "system" and chinese_instruction_text in msg.get("content", "")
+                            for msg in context
+                        )
+                        if not has_chinese_instruction:
+                            chinese_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
+                            # Ищем системное сообщение и добавляем инструкцию в начало
+                            system_found = False
+                            for msg in context:
+                                if msg.get("role") == "system":
+                                    msg["content"] = chinese_instruction + "\n\n" + msg.get("content", "")
+                                    system_found = True
+                                    break
+                            if not system_found:
+                                context.insert(0, {"role": "system", "content": chinese_instruction})
 
                 # Проверяем, нужен ли веб-поиск (по ключевым словам)
                 web_search_results = None

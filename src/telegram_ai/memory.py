@@ -296,3 +296,76 @@ class Memory:
         finally:
             session.close()
 
+    def delete_user_data(self, user_id: int) -> Dict[str, int]:
+        """
+        Удалить все данные пользователя: сообщения, разговор, контекст и rate limit записи.
+
+        Args:
+            user_id: ID пользователя Telegram
+
+        Returns:
+            Словарь с количеством удаленных записей:
+            {
+                "messages": количество удаленных сообщений,
+                "conversations": количество удаленных разговоров (0 или 1),
+                "user_context": количество удаленных контекстов (0 или 1),
+                "rate_limits": количество удаленных rate limit записей (0 или 1)
+            }
+        """
+        session = self._get_session()
+        try:
+            deleted_counts = {
+                "messages": 0,
+                "conversations": 0,
+                "user_context": 0,
+                "rate_limits": 0,
+            }
+
+            # Находим conversation для пользователя
+            conversation = (
+                session.query(Conversation)
+                .filter(Conversation.user_id == user_id)
+                .first()
+            )
+
+            if conversation:
+                # Удаляем все сообщения этого разговора
+                deleted_messages = (
+                    session.query(Message)
+                    .filter(Message.conversation_id == conversation.id)
+                    .delete()
+                )
+                deleted_counts["messages"] = deleted_messages
+
+                # Удаляем сам разговор
+                session.delete(conversation)
+                deleted_counts["conversations"] = 1
+
+            # Удаляем user_context
+            deleted_context = (
+                session.query(UserContext)
+                .filter(UserContext.user_id == user_id)
+                .delete()
+            )
+            deleted_counts["user_context"] = deleted_context
+
+            # Удаляем rate_limits
+            deleted_rate_limits = (
+                session.query(RateLimit)
+                .filter(RateLimit.user_id == user_id)
+                .delete()
+            )
+            deleted_counts["rate_limits"] = deleted_rate_limits
+
+            session.commit()
+            logger.info(
+                f"Deleted all data for user_id={user_id}: "
+                f"{deleted_counts['messages']} messages, "
+                f"{deleted_counts['conversations']} conversations, "
+                f"{deleted_counts['user_context']} user contexts, "
+                f"{deleted_counts['rate_limits']} rate limits"
+            )
+            return deleted_counts
+        finally:
+            session.close()
+
