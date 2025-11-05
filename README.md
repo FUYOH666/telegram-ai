@@ -5,11 +5,11 @@
 ## Быстрый старт
 
 ```bash
-# Установка зависимостей
-uv sync
+# Одна команда для запуска (из любого места в терминале):
+cd /path/to/TelegramAI && uv sync && uv run telegram-ai
 
-# Запуск приложения
-uv run telegram-ai
+# Пример для стандартного пути:
+cd ~/development/TelegramAI && uv sync && uv run telegram-ai
 ```
 
 ## Требования
@@ -23,20 +23,22 @@ uv run telegram-ai
 
 ## Установка
 
-1. Клонируйте репозиторий:
+1. Клонируйте репозиторий и запустите:
 ```bash
 git clone <repository-url>
 cd TelegramAI
-```
-
-2. Установите зависимости:
-```bash
 uv sync
 ```
 
-3. Создайте `.env` файл из шаблона:
+2. Создайте `.env` файл из шаблона (если есть):
 ```bash
 cp .env.example .env
+# Отредактируйте .env и добавьте ваши credentials
+```
+
+3. Запустите приложение:
+```bash
+uv run telegram-ai
 ```
 
 ## Конфигурация
