@@ -1020,45 +1020,198 @@ class TelegramUserClient:
                         and self.calendar.detect_consultation_request(message_text)
                     ):
                         try:
-                            # Извлекаем время из сообщения или ответа
-                            extracted_time = self.calendar.extract_time_from_message(
+                            # Получаем время сообщения от Telegram (UTC) и конвертируем в локальную таймзону
+                            message_time_utc = event.message.date  # datetime в UTC от Telegram
+                            message_time_local = message_time_utc.astimezone(self.calendar.timezone)
+                            
+                            logger.debug(
+                                f"Message time from Telegram: UTC={message_time_utc}, "
+                                f"Local={message_time_local} (timezone: {self.calendar.timezone_name})"
+                            )
+                            
+                            # Проверяем запрос на перенос/отмену
+                            reschedule_type, is_reschedule = self.calendar.detect_reschedule_request(
                                 message_text
                             )
-                            if not extracted_time:
-                                extracted_time = self.calendar.extract_time_from_message(
-                                    response
-                                )
-
-                            if extracted_time:
-                                # Создаем встречу на указанное время
-                                end_time = extracted_time + timedelta(
-                                    minutes=self.calendar.default_consultation_duration_minutes
-                                )
-                                event_id = self.calendar.create_event(
-                                    summary="Консультация Scanovich.ai",
-                                    description="Консультация с пользователем Telegram",
-                                    start_time=extracted_time,
-                                    end_time=end_time,
-                                )
-                                # Логируем время в локальной таймзоне для читаемости
-                                logger.info(
-                                    f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} (local timezone: {self.calendar.timezone_name})"
-                                )
-                                # Отправляем пользователю сообщение с локальным временем
-                                await event.reply(
-                                    f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!"
-                                )
+                            
+                            if is_reschedule:
+                                # Обработка переноса или отмены
+                                latest_event = self.calendar.find_latest_user_event(sender.id)
+                                
+                                if reschedule_type == "cancel":
+                                    # Отмена встречи
+                                    if latest_event:
+                                        event_id = latest_event.get("id")
+                                        self.calendar.delete_event(event_id)
+                                        
+                                        # Обновляем контекст пользователя
+                                        if user_context_data:
+                                            try:
+                                                context_dict = json.loads(user_context_data)
+                                                context_dict.pop("last_event_id", None)
+                                                context_dict.pop("last_event_time", None)
+                                                self.memory.save_user_context(sender.id, json.dumps(context_dict))
+                                            except (json.JSONDecodeError, ValueError):
+                                                pass
+                                        
+                                        await event.reply("✅ Встреча отменена.")
+                                        logger.info(f"Event cancelled: {event_id} for user_id={sender.id}")
+                                    else:
+                                        await event.reply("Не найдено запланированных встреч для отмены.")
+                                
+                                elif reschedule_type == "reschedule":
+                                    # Перенос встречи
+                                    if latest_event:
+                                        # Извлекаем новое время из сообщения
+                                        extracted_time = self.calendar.extract_time_from_message(
+                                            message_text, reference_time=message_time_local
+                                        )
+                                        
+                                        if extracted_time:
+                                            # Валидируем время
+                                            end_time = extracted_time + timedelta(
+                                                minutes=self.calendar.default_consultation_duration_minutes
+                                            )
+                                            is_valid, error_msg = self.calendar.validate_event_time(
+                                                extracted_time, end_time
+                                            )
+                                            
+                                            if not is_valid:
+                                                await event.reply(f"❌ {error_msg}")
+                                                return
+                                            
+                                            # Проверяем конфликты (исключаем текущее событие)
+                                            event_id = latest_event.get("id")
+                                            has_conflict, conflicts = self.calendar.check_time_conflict(
+                                                extracted_time, end_time, exclude_event_id=event_id
+                                            )
+                                            
+                                            if has_conflict:
+                                                await event.reply(
+                                                    "❌ На это время уже есть другая встреча. "
+                                                    "Выберите другое время."
+                                                )
+                                                return
+                                            
+                                            # Обновляем встречу
+                                            self.calendar.update_event(event_id, extracted_time, end_time)
+                                            
+                                            # Обновляем контекст пользователя
+                                            if user_context_data:
+                                                try:
+                                                    context_dict = json.loads(user_context_data)
+                                                    context_dict["last_event_id"] = event_id
+                                                    context_dict["last_event_time"] = extracted_time.strftime(
+                                                        "%Y-%m-%dT%H:%M:%S"
+                                                    )
+                                                    self.memory.save_user_context(
+                                                        sender.id, json.dumps(context_dict)
+                                                    )
+                                                except (json.JSONDecodeError, ValueError):
+                                                    pass
+                                            
+                                            logger.info(
+                                                f"✅ Event rescheduled: {event_id} to {extracted_time.strftime('%Y-%m-%d %H:%M')} "
+                                                f"(local timezone: {self.calendar.timezone_name})"
+                                            )
+                                            await event.reply(
+                                                f"✅ Встреча перенесена на {extracted_time.strftime('%d.%m в %H:%M')}!"
+                                            )
+                                        else:
+                                            # Время не найдено - предлагаем слоты
+                                            slots = self.calendar.suggest_available_slots()
+                                            slots_text = "\n".join(f"• {slot}" for slot in slots)
+                                            await event.reply(
+                                                f"📅 На какое время перенести встречу?\n\n{slots_text}\n\n"
+                                                "Напишите удобное время."
+                                            )
+                                    else:
+                                        await event.reply(
+                                            "Не найдено запланированных встреч для переноса. "
+                                            "Создать новую встречу?"
+                                        )
                             else:
-                                # Предлагаем доступные слоты
-                                slots = self.calendar.suggest_available_slots()
-                                slots_text = "\n".join(f"• {slot}" for slot in slots)
-                                await event.reply(
-                                    f"📅 Предлагаю следующие варианты времени:\n{slots_text}\n\n"
-                                    "Напишите удобное время, и я создам встречу!"
+                                # Обычное создание встречи
+                                # Извлекаем время из сообщения или ответа, используя время от Telegram
+                                extracted_time = self.calendar.extract_time_from_message(
+                                    message_text, reference_time=message_time_local
                                 )
+                                if not extracted_time:
+                                    extracted_time = self.calendar.extract_time_from_message(
+                                        response, reference_time=message_time_local
+                                    )
+
+                                if extracted_time:
+                                    # Валидируем время
+                                    end_time = extracted_time + timedelta(
+                                        minutes=self.calendar.default_consultation_duration_minutes
+                                    )
+                                    is_valid, error_msg = self.calendar.validate_event_time(
+                                        extracted_time, end_time
+                                    )
+                                    
+                                    if not is_valid:
+                                        await event.reply(f"❌ {error_msg}")
+                                        return
+                                    
+                                    # Проверяем конфликты
+                                    has_conflict, conflicts = self.calendar.check_time_conflict(
+                                        extracted_time, end_time
+                                    )
+                                    
+                                    if has_conflict:
+                                        await event.reply(
+                                            "❌ На это время уже есть встреча. "
+                                            "Выберите другое время."
+                                        )
+                                        return
+                                    
+                                    # Создаем встречу на указанное время
+                                    event_id = self.calendar.create_event(
+                                        summary="Консультация Scanovich.ai",
+                                        description="Консультация с пользователем Telegram",
+                                        start_time=extracted_time,
+                                        end_time=end_time,
+                                        user_id=sender.id,
+                                    )
+                                    
+                                    # Сохраняем контекст встречи
+                                    if user_context_data:
+                                        try:
+                                            context_dict = json.loads(user_context_data)
+                                        except (json.JSONDecodeError, ValueError):
+                                            context_dict = {}
+                                    else:
+                                        context_dict = {}
+                                    context_dict["last_event_id"] = event_id
+                                    context_dict["last_event_time"] = extracted_time.strftime(
+                                        "%Y-%m-%dT%H:%M:%S"
+                                    )
+                                    self.memory.save_user_context(sender.id, json.dumps(context_dict))
+                                    
+                                    # Логируем время в локальной таймзоне для читаемости
+                                    logger.info(
+                                        f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} "
+                                        f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
+                                    )
+                                    # Отправляем пользователю сообщение с локальным временем
+                                    await event.reply(
+                                        f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!"
+                                    )
+                                else:
+                                    # Предлагаем доступные слоты
+                                    slots = self.calendar.suggest_available_slots()
+                                    slots_text = "\n".join(f"• {slot}" for slot in slots)
+                                    await event.reply(
+                                        f"📅 Предлагаю следующие варианты времени:\n{slots_text}\n\n"
+                                        "Напишите удобное время, и я создам встречу!"
+                                    )
                         except Exception as e:
                             logger.error(
-                                f"Error creating consultation event: {e}", exc_info=True
+                                f"Error handling consultation request: {e}", exc_info=True
+                            )
+                            await event.reply(
+                                "❌ Произошла ошибка при обработке запроса на встречу. Попробуйте позже."
                             )
 
                 except httpx.ReadTimeout as e:
