@@ -4,17 +4,17 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 import httpx
 import pytz
 from tenacity import (
     retry,
-    stop_after_attempt,
-    wait_exponential,
+    retry_any,
     retry_if_exception_type,
     retry_unless_exception_type,
-    retry_any,
+    stop_after_attempt,
+    wait_exponential,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,6 +161,10 @@ class AIClient:
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
         max_response_length: Optional[int] = None,
+        max_tokens: Optional[int] = None,
+        top_p: Optional[float] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> str:
         """
         Получить ответ от AI-сервера.
@@ -170,6 +174,10 @@ class AIClient:
                 [{"role": "user", "content": "текст"}, ...]
             temperature: Температура генерации (0.0-1.0)
             max_response_length: Максимальная длина ответа в символах (опционально)
+            max_tokens: Максимальное количество токенов в ответе (опционально)
+            top_p: Top-p sampling parameter (опционально)
+            frequency_penalty: Frequency penalty parameter (опционально)
+            presence_penalty: Presence penalty parameter (опционально)
 
         Returns:
             Ответ от AI-сервера (обрезанный до max_response_length если указано)
@@ -192,8 +200,16 @@ class AIClient:
             "model": self.model,
             "messages": final_messages,
             "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
+
+        # Добавляем дополнительные параметры если указаны
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if frequency_penalty is not None:
+            payload["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            payload["presence_penalty"] = presence_penalty
 
         request_start_time = time.time()
         

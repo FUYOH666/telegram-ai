@@ -3,20 +3,17 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import (
-    create_engine,
     Column,
+    DateTime,
     Integer,
     String,
-    DateTime,
     Text,
-    Boolean,
-    func,
+    create_engine,
 )
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
 

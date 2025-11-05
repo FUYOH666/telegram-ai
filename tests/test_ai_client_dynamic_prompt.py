@@ -1,8 +1,6 @@
 """Тесты для динамического системного промпта в AIClient."""
 
 import pytest
-from unittest.mock import patch
-from datetime import datetime, timezone
 
 from telegram_ai.ai_client import AIClient
 

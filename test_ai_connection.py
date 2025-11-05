@@ -39,7 +39,7 @@ async def test_ai_connection():
     try:
         print("📤 Отправка тестового сообщения...")
         response = await client.get_response(test_messages)
-        print(f"✅ Ответ получен:")
+        print("✅ Ответ получен:")
         print(f"   {response}")
         print()
         print("✅ Подключение работает!")

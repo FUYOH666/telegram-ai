@@ -1,23 +1,25 @@
 """Telegram User Client через Telethon для личного аккаунта."""
 
-import asyncio
+import json
 import logging
 import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
-from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError
 import httpx
+from telethon import TelegramClient, events
 
 from .ai_client import AIClient
 from .calendar import GoogleCalendar
 from .config import Config
+from .intent_classifier import IntentClassifier
 from .memory import Memory
 from .rate_limiter import RateLimiter
 from .sales_flow import SalesFlow, SalesStage
+from .tools import Tools
 from .voice_handler import VoiceHandler
+from .web_search import WebSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,8 @@ class TelegramUserClient:
         self.rate_limiter: Optional[RateLimiter] = None
         self.voice_handler: Optional[VoiceHandler] = None
         self.sales_flow: Optional[SalesFlow] = None
+        self.intent_classifier: Optional[IntentClassifier] = None
+        self.tools: Optional[Tools] = None
 
         # Инициализируем компоненты
         self._init_components()
@@ -103,6 +107,25 @@ class TelegramUserClient:
         if self.config.sales_flow.enabled:
             self.sales_flow = SalesFlow(enabled=self.config.sales_flow.enabled)
             logger.info("SalesFlow initialized")
+
+        # Intent Classifier (всегда включен)
+        self.intent_classifier = IntentClassifier()
+        logger.info("IntentClassifier initialized")
+
+        # Web Search Tool (если включен)
+        web_search_tool = None
+        if self.config.web_search.enabled:
+            web_search_tool = WebSearchTool(
+                mcp_server_url=self.config.web_search.mcp_server_url,
+                timeout=self.config.web_search.timeout,
+                max_results=self.config.web_search.max_results,
+                max_queries_per_conversation=self.config.web_search.max_queries_per_conversation,
+            )
+            logger.info("WebSearchTool initialized")
+
+        # Tools (инструменты для работы с лидами)
+        self.tools = Tools(memory=self.memory, web_search_tool=web_search_tool)
+        logger.info("Tools initialized")
 
         # Google Calendar (если включен)
         if self.config.google_calendar.enabled:
@@ -261,6 +284,33 @@ class TelegramUserClient:
 
                 # Сохраняем сообщение пользователя (только если есть текст)
                 username = getattr(sender, "username", None)
+                # Извлекаем имя пользователя (first_name или full_name)
+                user_first_name = getattr(sender, "first_name", None)
+                user_last_name = getattr(sender, "last_name", None)
+                user_full_name = None
+                if user_first_name:
+                    user_full_name = (
+                        f"{user_first_name} {user_last_name}".strip()
+                        if user_last_name
+                        else user_first_name
+                    )
+                
+                # Сохраняем имя пользователя в контексте если еще не сохранено
+                if user_full_name:
+                    user_context_data = self.memory.get_user_context(sender.id)
+                    if user_context_data:
+                        try:
+                            context_dict = json.loads(user_context_data)
+                            if "name" not in context_dict:
+                                context_dict["name"] = user_full_name
+                                self.memory.save_user_context(sender.id, json.dumps(context_dict))
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    else:
+                        # Создаем новый контекст с именем
+                        new_context = json.dumps({"name": user_full_name})
+                        self.memory.save_user_context(sender.id, new_context)
+                
                 if message_text:
                     # Записываем сообщение в rate limiter после успешной проверки
                     self.rate_limiter.record_message(sender.id, message_text)
@@ -278,12 +328,65 @@ class TelegramUserClient:
                 # Определяем, является ли это первым сообщением в разговоре
                 is_first_message = len(context) <= 1  # Только системное сообщение или его нет
 
-                # Работа со скриптом продаж
+                # Классификация намерений
                 user_context_data = self.memory.get_user_context(sender.id)
+                current_intent = None
+                if user_context_data:
+                    try:
+                        context_dict = json.loads(user_context_data)
+                        current_intent = context_dict.get("intent")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
+                if self.intent_classifier:
+                    detected_intent = self.intent_classifier.classify(
+                        message_text, current_intent
+                    )
+                    if detected_intent.value != current_intent or not current_intent:
+                        if detected_intent.value != current_intent:
+                            logger.info(f"Intent detected: {current_intent} -> {detected_intent.value}")
+                        
+                        # Обновляем intent в контексте
+                        if self.sales_flow and self.sales_flow.enabled:
+                            if user_context_data:
+                                user_context_data = self.sales_flow.update_intent(
+                                    user_context_data, detected_intent.value
+                                )
+                            else:
+                                user_context_data = self.sales_flow.update_intent(
+                                    None, detected_intent.value
+                                )
+                        else:
+                            # Если sales_flow отключен, обновляем напрямую
+                            if user_context_data:
+                                try:
+                                    context_dict = json.loads(user_context_data)
+                                except (json.JSONDecodeError, ValueError):
+                                    context_dict = {}
+                            else:
+                                context_dict = {}
+                            context_dict["intent"] = detected_intent.value
+                            user_context_data = json.dumps(context_dict)
+                        
+                        self.memory.save_user_context(sender.id, user_context_data)
+                        current_intent = detected_intent.value
+
+                # Работа со скриптом продаж
                 max_response_length = None
                 
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
+                    
+                    # Специальная логика: если пользователь пишет "привет" - всегда сбрасываем на GREETING
+                    # (независимо от истории, это сигнал начала нового диалога)
+                    message_lower = message_text.lower().strip()
+                    greeting_keywords = ["привет", "здравствуй", "здравствуйте", "добрый", "начать"]
+                    if any(keyword in message_lower for keyword in greeting_keywords):
+                        if current_stage != SalesStage.GREETING:
+                            logger.info(f"Greeting detected, resetting stage to GREETING (was {current_stage.value})")
+                            current_stage = SalesStage.GREETING
+                            user_context_data = self.sales_flow.update_stage(user_context_data, current_stage)
+                            self.memory.save_user_context(sender.id, user_context_data)
                     
                     # Определяем переход на следующий этап
                     new_stage = self.sales_flow.detect_stage_transition(
@@ -300,31 +403,128 @@ class TelegramUserClient:
                             user_context_data = self.sales_flow.update_stage(None, current_stage)
                             self.memory.save_user_context(sender.id, user_context_data)
 
+                    # Проверяем и запрашиваем недостающие слоты (только для Sales/Real Estate)
+                    slot_prompt_addition = ""
+                    if current_intent in ("SALES_AI", "REAL_ESTATE"):
+                        next_slot = self.sales_flow.get_next_slot_to_ask(
+                            user_context_data, current_intent
+                        )
+                        if next_slot:
+                            slot_prompt = self.sales_flow.get_slot_prompt(
+                                next_slot, current_intent
+                            )
+                            if slot_prompt:
+                                slot_prompt_addition = (
+                                    f"\n\nВАЖНО: Сейчас нужно выяснить: {slot_prompt} "
+                                    f"Используй этот вопрос естественно в диалоге, но не навязывай."
+                                )
+
+                    # Получаем максимальную длину ответа для текущего этапа
+                    max_response_length = self.sales_flow.get_stage_max_length(current_stage)
+                    
                     # Модифицируем системный промпт для текущего этапа
                     stage_modifier = self.sales_flow.get_stage_prompt_modifier(current_stage)
                     if stage_modifier and context:
+                        # Добавляем информацию о максимальной длине в модификатор
+                        length_info = ""
+                        if max_response_length:
+                            length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
+                        
                         # Добавляем модификатор как системное сообщение
                         modified_context = context.copy()
                         # Обновляем или добавляем системное сообщение
                         system_found = False
                         for msg in modified_context:
                             if msg.get("role") == "system":
-                                msg["content"] = stage_modifier + "\n\n" + msg.get("content", "")
+                                full_modifier = stage_modifier + length_info + slot_prompt_addition
+                                msg["content"] = full_modifier + "\n\n" + msg.get("content", "")
                                 system_found = True
                                 break
                         if not system_found:
-                            modified_context.insert(0, {"role": "system", "content": stage_modifier})
+                            full_modifier = stage_modifier + length_info + slot_prompt_addition
+                            modified_context.insert(0, {"role": "system", "content": full_modifier})
                         context = modified_context
 
-                    # Получаем максимальную длину ответа для текущего этапа
-                    max_response_length = self.sales_flow.get_stage_max_length(current_stage)
+                # Проверяем, нужен ли веб-поиск (по ключевым словам)
+                web_search_results = None
+                if (
+                    self.tools
+                    and self.tools.web_search_tool
+                    and self.config.web_search.enabled
+                ):
+                    # Ключевые слова/фразы, которые требуют актуальных данных
+                    search_triggers = [
+                        "актуальн",
+                        "новост",
+                        "последн",
+                        "сейчас",
+                        "текущ",
+                        "цены",
+                        "стоимость",
+                        "сколько стоит",
+                        "тренд",
+                        "статистика",
+                        "данные",
+                        "информация о",
+                        "узнать о",
+                        "найти",
+                        "поиск",
+                    ]
+                    
+                    message_lower = message_text.lower()
+                    needs_search = any(
+                        trigger in message_lower for trigger in search_triggers
+                    )
+                    
+                    if needs_search:
+                        logger.info(f"🔍 Web search triggered for query: {message_text[:100]}")
+                        try:
+                            web_search_results = await self.tools.web_search(
+                                query=message_text, user_id=sender.id
+                            )
+                            if web_search_results:
+                                logger.info(
+                                    f"✅ Web search completed: "
+                                    f"{len(web_search_results.get('results', []))} results"
+                                )
+                                # Форматируем результаты для включения в контекст
+                                formatted_results = self.tools.web_search_tool.format_search_results(
+                                    web_search_results
+                                )
+                                if formatted_results:
+                                    # Добавляем результаты поиска в контекст как системное сообщение
+                                    context.append(
+                                        {
+                                            "role": "system",
+                                            "content": f"Актуальная информация из интернета:\n\n{formatted_results}\n\nИспользуй эту информацию для ответа, но не повторяй источники дословно.",
+                                        }
+                                    )
+                        except Exception as e:
+                            logger.error(f"Error performing web search: {e}", exc_info=True)
+
+                # Получаем динамические параметры генерации на основе intent и stage
+                generation_params = {}
+                if self.sales_flow and self.sales_flow.enabled and current_stage:
+                    generation_params = self.sales_flow.get_generation_params(
+                        current_stage, current_intent
+                    )
+                    logger.debug(
+                        f"Using dynamic generation params for stage={current_stage.value}, "
+                        f"intent={current_intent}: {generation_params}"
+                    )
 
                 # Генерируем ответ через AI
                 try:
                     ai_request_start = time.time()
                     logger.info(f"🤖 Sending {len(context)} messages to AI server...")
                     response = await self.ai_client.get_response(
-                        context, max_response_length=max_response_length
+                        context,
+                        max_response_length=max_response_length,
+                        temperature=generation_params.get("temperature"),
+                        max_tokens=generation_params.get("max_tokens"),
+                        top_p=generation_params.get("top_p"),
+                        frequency_penalty=generation_params.get("frequency_penalty"),
+                        presence_penalty=generation_params.get("presence_penalty"),
                     )
                     ai_request_time = time.time() - ai_request_start
                     logger.info(f"✅ AI response received in {ai_request_time:.2f}s ({len(response)} chars): {response[:150]}...")
@@ -341,6 +541,46 @@ class TelegramUserClient:
                         role="assistant",
                         username=username,
                     )
+
+                    # Автоматическое сохранение лида если заполнены ключевые слоты
+                    if (
+                        self.tools
+                        and self.sales_flow
+                        and self.sales_flow.enabled
+                        and current_intent in ("SALES_AI", "REAL_ESTATE")
+                    ):
+                        try:
+                            filled_slots = self.sales_flow.get_slots(user_context_data)
+                            # Сохраняем лид если заполнено хотя бы 2 ключевых слота
+                            key_slots = ["goal", "purpose", "budget", "budget_band", "contact"]
+                            filled_key_slots = [slot for slot in key_slots if slot in filled_slots]
+                            
+                            if len(filled_key_slots) >= 2:  # Минимум 2 ключевых слота
+                                # Извлекаем имя из контекста или используем username
+                                lead_name = username or filled_slots.get("name")
+                                
+                                # Получаем текущий stage для заметок
+                                current_stage_for_notes = None
+                                if user_context_data:
+                                    try:
+                                        context_dict = json.loads(user_context_data)
+                                        current_stage_for_notes = context_dict.get("sales_stage", "unknown")
+                                    except (json.JSONDecodeError, ValueError):
+                                        pass
+                                
+                                result = self.tools.save_lead(
+                                    user_id=sender.id,
+                                    name=lead_name,
+                                    lang=current_intent or "ru",
+                                    contact=filled_slots.get("contact"),
+                                    source="telegram",
+                                    slots=filled_slots,
+                                    notes=f"Intent: {current_intent}, Stage: {current_stage_for_notes or 'unknown'}",
+                                )
+                                if result.get("status") == "saved":
+                                    logger.info(f"✅ Lead auto-saved for user_id={sender.id}")
+                        except Exception as e:
+                            logger.error(f"Error auto-saving lead: {e}", exc_info=True)
 
                     # Автоматическое создание встреч при запросах на консультацию
                     if (
@@ -365,7 +605,7 @@ class TelegramUserClient:
                                 )
                                 event_id = self.calendar.create_event(
                                     summary="Консультация Scanovich.ai",
-                                    description=f"Консультация с пользователем Telegram",
+                                    description="Консультация с пользователем Telegram",
                                     start_time=extracted_time,
                                     end_time=end_time,
                                 )
@@ -463,8 +703,6 @@ class TelegramUserClient:
             return False
 
         try:
-            sender = await event.get_sender()
-
             # Команда /calendar или /events - список событий
             if message_text.startswith(("/calendar", "/events")):
                 events_list = self.calendar.list_events(max_results=10)
@@ -490,7 +728,7 @@ class TelegramUserClient:
                     )
                     return True
 
-                event_id = self.calendar.create_event(
+                self.calendar.create_event(
                     summary=summary, description=description
                 )
                 await event.reply(f"✅ Событие создано: {summary}")

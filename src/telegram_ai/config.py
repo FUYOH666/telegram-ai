@@ -1,13 +1,12 @@
 """Конфигурация приложения через pydantic-settings."""
 
 import logging
-import os
 from pathlib import Path
 from typing import List, Optional
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Загружаем .env файл
@@ -175,6 +174,29 @@ class SalesFlowConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SALES_FLOW_")
 
 
+class WebSearchConfig(BaseSettings):
+    """Конфигурация Web Search MCP."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Включить интеграцию с Web Search MCP",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    mcp_server_url: str = Field(
+        default="http://localhost:8080",
+        description="URL MCP Web Search сервера",
+    )
+    max_results: int = Field(
+        default=3, description="Максимальное количество результатов поиска"
+    )
+    max_queries_per_conversation: int = Field(
+        default=2, description="Максимальное количество запросов за диалог"
+    )
+    timeout: int = Field(default=10, description="Таймаут запроса в секундах")
+
+    model_config = SettingsConfigDict(env_prefix="WEB_SEARCH_")
+
+
 class Config(BaseSettings):
     """Основная конфигурация приложения."""
 
@@ -185,6 +207,7 @@ class Config(BaseSettings):
     rate_limiting: RateLimitingConfig
     asr_server: ASRServerConfig
     sales_flow: SalesFlowConfig
+    web_search: WebSearchConfig
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "Config":
@@ -234,6 +257,15 @@ class Config(BaseSettings):
         # Sales flow конфигурация
         sales_flow = SalesFlowConfig(**yaml_data.get("sales_flow", {}))
 
+        # Web Search конфигурация
+        web_search_data = yaml_data.get("web_search", {})
+        enabled_val = web_search_data.get("enabled", False)
+        if isinstance(enabled_val, str):
+            web_search_data["enabled"] = enabled_val.lower() in ("true", "1", "yes")
+        elif not isinstance(enabled_val, bool):
+            web_search_data["enabled"] = bool(enabled_val)
+        web_search = WebSearchConfig(**web_search_data)
+
         return cls(
             telegram=telegram,
             ai_server=ai_server,
@@ -242,6 +274,7 @@ class Config(BaseSettings):
             rate_limiting=rate_limiting,
             asr_server=asr_server,
             sales_flow=sales_flow,
+            web_search=web_search,
         )
 
     @staticmethod

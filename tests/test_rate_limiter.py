@@ -3,7 +3,6 @@
 import pytest
 import tempfile
 import os
-from datetime import datetime, timedelta, timezone
 
 from telegram_ai.memory import Memory
 from telegram_ai.rate_limiter import RateLimiter

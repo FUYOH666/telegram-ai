@@ -3,7 +3,6 @@
 import pytest
 import tempfile
 import os
-from datetime import datetime
 
 from telegram_ai.memory import Memory
 

@@ -2,10 +2,10 @@
 
 import asyncio
 import logging
-import sys
 import sqlite3
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from .config import Config
 
