@@ -89,14 +89,19 @@ class RateLimiter:
             now = datetime.now(timezone.utc)
 
             # Проверяем временную блокировку
-            if rate_limit.blocked_until and rate_limit.blocked_until > now:
-                remaining_minutes = int(
-                    (rate_limit.blocked_until - now).total_seconds() / 60
-                ) + 1
-                return True, f"Слишком много сообщений. Подождите {remaining_minutes} минут."
+            # Нормализуем blocked_until к UTC если нужно
+            blocked_until = rate_limit.blocked_until
+            if blocked_until:
+                if blocked_until.tzinfo is None:
+                    blocked_until = blocked_until.replace(tzinfo=timezone.utc)
+                if blocked_until > now:
+                    remaining_minutes = int(
+                        (blocked_until - now).total_seconds() / 60
+                    ) + 1
+                    return True, f"Слишком много сообщений. Подождите {remaining_minutes} минут."
 
             # Если блокировка истекла, снимаем её
-            if rate_limit.blocked_until and rate_limit.blocked_until <= now:
+            if blocked_until and blocked_until <= now:
                 rate_limit.blocked_until = None
                 rate_limit.message_count_minute = 0
                 rate_limit.message_count_hour = 0
@@ -150,11 +155,11 @@ class RateLimiter:
             )
 
             if not rate_limit:
-                # Создаем новую запись
+                # Создаем новую запись и сразу записываем первое сообщение
                 rate_limit = RateLimit(
                     user_id=user_id,
-                    message_count_minute=0,
-                    message_count_hour=0,
+                    message_count_minute=1,  # Первое сообщение
+                    message_count_hour=1,  # Первое сообщение
                     window_start_minute=now,
                     window_start_hour=now,
                     last_message_time=now,
@@ -166,7 +171,10 @@ class RateLimiter:
                 return True, None
 
             # Проверка минимального интервала
-            time_since_last = (now - rate_limit.last_message_time).total_seconds()
+            last_time = rate_limit.last_message_time
+            if last_time.tzinfo is None:
+                last_time = last_time.replace(tzinfo=timezone.utc)
+            time_since_last = (now - last_time).total_seconds()
             if time_since_last < self.min_interval_seconds:
                 logger.debug(
                     f"Message too soon ({time_since_last:.1f}s < {self.min_interval_seconds}s) for user {user_id}"
@@ -174,23 +182,35 @@ class RateLimiter:
                 return False, f"Подождите {self.min_interval_seconds} секунд перед следующим сообщением."
 
             # Проверка повторяющихся сообщений
-            if (
+            # Проверяем ПЕРЕД увеличением счетчика повторений
+            is_repeated = (
                 rate_limit.last_message_content
                 and message_content == rate_limit.last_message_content
-            ):
-                rate_limit.repeated_messages += 1
-                if rate_limit.repeated_messages >= self.max_repeated_messages:
+            )
+            
+            if is_repeated:
+                # Если это будет уже max_repeated_messages-е повторяющееся сообщение, блокируем
+                if rate_limit.repeated_messages + 1 >= self.max_repeated_messages:
                     logger.warning(
-                        f"User {user_id} blocked for repeated messages ({rate_limit.repeated_messages})"
+                        f"User {user_id} blocked for repeated messages ({rate_limit.repeated_messages + 1})"
                     )
                     self.block_user(user_id, "Повторяющиеся сообщения")
                     return False, "Слишком много повторяющихся сообщений. Подождите 10 минут."
+                # Иначе увеличиваем счетчик (будет сохранен в record_message)
+                rate_limit.repeated_messages += 1
             else:
                 rate_limit.repeated_messages = 0
+            
+            # Сохраняем изменения в БД перед вызовом record_message
+            session.commit()
 
             # Обновляем окна времени (простой счетчик с reset)
             minute_window_start = rate_limit.window_start_minute
+            if minute_window_start.tzinfo is None:
+                minute_window_start = minute_window_start.replace(tzinfo=timezone.utc)
             hour_window_start = rate_limit.window_start_hour
+            if hour_window_start.tzinfo is None:
+                hour_window_start = hour_window_start.replace(tzinfo=timezone.utc)
 
             # Сброс счетчика минутного окна
             if (now - minute_window_start).total_seconds() >= 60:
@@ -202,17 +222,18 @@ class RateLimiter:
                 rate_limit.message_count_hour = 0
                 rate_limit.window_start_hour = now
 
-            # Проверка лимитов
-            if rate_limit.message_count_minute >= self.messages_per_minute:
+            # Проверка лимитов (проверяем ПЕРЕД увеличением счетчика)
+            # Если текущий счетчик + 1 превысит лимит, блокируем
+            if rate_limit.message_count_minute + 1 > self.messages_per_minute:
                 logger.warning(
-                    f"User {user_id} exceeded minute limit ({rate_limit.message_count_minute}/{self.messages_per_minute})"
+                    f"User {user_id} exceeded minute limit ({rate_limit.message_count_minute + 1}/{self.messages_per_minute})"
                 )
                 self.block_user(user_id, "Превышен лимит сообщений в минуту")
                 return False, f"Слишком много сообщений в минуту (лимит: {self.messages_per_minute}). Подождите 10 минут."
 
-            if rate_limit.message_count_hour >= self.messages_per_hour:
+            if rate_limit.message_count_hour + 1 > self.messages_per_hour:
                 logger.warning(
-                    f"User {user_id} exceeded hour limit ({rate_limit.message_count_hour}/{self.messages_per_hour})"
+                    f"User {user_id} exceeded hour limit ({rate_limit.message_count_hour + 1}/{self.messages_per_hour})"
                 )
                 self.block_user(user_id, "Превышен лимит сообщений в час")
                 return False, f"Слишком много сообщений в час (лимит: {self.messages_per_hour}). Подождите 10 минут."
@@ -259,14 +280,30 @@ class RateLimiter:
                 now = datetime.now(timezone.utc)
 
                 # Обновляем окна если нужно
-                if (now - rate_limit.window_start_minute).total_seconds() >= 60:
+                window_start_minute = rate_limit.window_start_minute
+                if window_start_minute.tzinfo is None:
+                    window_start_minute = window_start_minute.replace(tzinfo=timezone.utc)
+                if (now - window_start_minute).total_seconds() >= 60:
                     rate_limit.message_count_minute = 0
                     rate_limit.window_start_minute = now
 
-                if (now - rate_limit.window_start_hour).total_seconds() >= 3600:
+                window_start_hour = rate_limit.window_start_hour
+                if window_start_hour.tzinfo is None:
+                    window_start_hour = window_start_hour.replace(tzinfo=timezone.utc)
+                if (now - window_start_hour).total_seconds() >= 3600:
                     rate_limit.message_count_hour = 0
                     rate_limit.window_start_hour = now
 
+                # Обновляем счетчик повторяющихся сообщений ПЕРЕД обновлением last_message_content
+                # Если сообщение повторяющееся, счетчик уже был увеличен в check_rate_limit
+                # Если нет - сбрасываем
+                if rate_limit.last_message_content == message_content:
+                    # Это повторяющееся сообщение, счетчик уже увеличен в check_rate_limit
+                    pass
+                else:
+                    # Новое сообщение, сбрасываем счетчик
+                    rate_limit.repeated_messages = 0
+                
                 # Увеличиваем счетчики
                 rate_limit.message_count_minute += 1
                 rate_limit.message_count_hour += 1

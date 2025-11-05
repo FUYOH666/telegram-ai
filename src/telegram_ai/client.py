@@ -191,6 +191,14 @@ class TelegramUserClient:
                             audio_path = await event.message.download_media(file="./temp_audio/")
                             audio_path = Path(audio_path)
 
+                            # Конвертируем .oga в .ogg если нужно (Telegram использует .oga, но ASR сервер не принимает)
+                            if audio_path.suffix.lower() == ".oga":
+                                # .oga это технически .ogg с Opus кодеком, переименовываем
+                                ogg_path = audio_path.with_suffix(".ogg")
+                                audio_path.rename(ogg_path)
+                                audio_path = ogg_path
+                                logger.debug(f"Renamed .oga to .ogg: {audio_path}")
+
                             # Транскрибируем
                             transcribed_text = await self.voice_handler.transcribe_voice(
                                 audio_path, language="ru"

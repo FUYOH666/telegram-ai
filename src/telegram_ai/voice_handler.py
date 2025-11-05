@@ -65,9 +65,23 @@ class VoiceHandler:
         try:
             logger.info(f"Transcribing audio file: {audio_file_path}")
 
+            # Определяем MIME-тип по расширению файла
+            mime_types = {
+                ".ogg": "audio/ogg",
+                ".oga": "audio/ogg",  # .oga это тоже Ogg контейнер
+                ".wav": "audio/wav",
+                ".mp3": "audio/mpeg",
+                ".m4a": "audio/mp4",
+                ".flac": "audio/flac",
+                ".webm": "audio/webm",
+            }
+            file_ext = audio_file_path.suffix.lower()
+            mime_type = mime_types.get(file_ext, "audio/ogg")  # По умолчанию audio/ogg
+
             # Открываем файл и отправляем multipart/form-data запрос
             with open(audio_file_path, "rb") as audio_file:
-                files = {"file": (audio_file_path.name, audio_file, "audio/ogg")}
+                # Используем правильное имя файла и MIME-тип
+                files = {"file": (audio_file_path.name, audio_file, mime_type)}
                 data = {}
                 if language:
                     data["language"] = language
