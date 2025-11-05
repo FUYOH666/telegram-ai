@@ -208,6 +208,7 @@ class TelegramUserClient:
                         auto_create_consultations=self.config.google_calendar.auto_create_consultations,
                         default_consultation_duration_minutes=self.config.google_calendar.default_consultation_duration_minutes,
                         available_slots=self.config.google_calendar.available_slots,
+                        timezone_name=self.config.ai_server.timezone,  # Используем таймзону из конфига AI сервера
                     )
                     logger.info("Google Calendar initialized")
                 else:
@@ -352,9 +353,20 @@ class TelegramUserClient:
                             if user_context_data:
                                 try:
                                     context_dict = json.loads(user_context_data)
-                                    asr_language = context_dict.get("lang", "ru")
-                                except (json.JSONDecodeError, ValueError):
-                                    pass
+                                    extracted_lang = context_dict.get("lang", "ru")
+                                    # Валидация: проверяем что это валидный код языка, а не intent или другое значение
+                                    if extracted_lang in SUPPORTED_LANGUAGES:
+                                        asr_language = extracted_lang
+                                    else:
+                                        logger.warning(
+                                            f"Invalid language code in user context: '{extracted_lang}' "
+                                            f"(expected one of {list(SUPPORTED_LANGUAGES.keys())}), using default 'ru'"
+                                        )
+                                        asr_language = "ru"
+                                except (json.JSONDecodeError, ValueError) as e:
+                                    logger.warning(f"Failed to parse user context for language: {e}, using default 'ru'")
+                            
+                            logger.debug(f"Using language code for ASR: {asr_language}")
                             
                             # Транскрибируем с учетом языка пользователя
                             transcribed_text = await self.voice_handler.transcribe_voice(
@@ -372,6 +384,36 @@ class TelegramUserClient:
                             except Exception as e:
                                 logger.warning(f"Failed to delete temp audio file: {e}")
 
+                        except httpx.HTTPStatusError as e:
+                            # Обработка HTTP ошибок от ASR сервера
+                            error_detail = ""
+                            try:
+                                if e.response is not None:
+                                    error_json = e.response.json()
+                                    error_detail = error_json.get("detail", e.response.text)
+                            except Exception:
+                                error_detail = str(e.response.text) if e.response else str(e)
+                            
+                            logger.error(
+                                f"HTTP error from ASR server: {e.response.status_code if e.response else 'unknown'} - {error_detail}",
+                                exc_info=True
+                            )
+                            
+                            # Более информативное сообщение об ошибке
+                            if e.response and e.response.status_code == 500:
+                                await event.reply(
+                                    "❌ Ошибка на стороне ASR сервера при распознавании голосового сообщения. "
+                                    "Попробуйте позже или отправьте текстом."
+                                )
+                            elif e.response and e.response.status_code == 400:
+                                await event.reply(
+                                    "❌ Неверный формат голосового сообщения. Попробуйте отправить текстом."
+                                )
+                            else:
+                                await event.reply(
+                                    "❌ Ошибка при распознавании голосового сообщения. Попробуйте позже или отправьте текстом."
+                                )
+                            return
                         except httpx.TimeoutException as e:
                             logger.error(f"Timeout transcribing voice message: {e}", exc_info=True)
                             await event.reply("⏱️ Таймаут при распознавании голосового сообщения. Попробуйте позже или отправьте текстом.")
@@ -380,8 +422,12 @@ class TelegramUserClient:
                             logger.error(f"Read timeout transcribing voice message: {e}", exc_info=True)
                             await event.reply("⏱️ Сервер ASR не отвечает вовремя. Попробуйте позже или отправьте текстом.")
                             return
+                        except httpx.NetworkError as e:
+                            logger.error(f"Network error transcribing voice message: {e}", exc_info=True)
+                            await event.reply("🌐 Ошибка сети при подключении к ASR серверу. Проверьте интернет-соединение и попробуйте позже.")
+                            return
                         except Exception as e:
-                            logger.error(f"Error transcribing voice message: {e}", exc_info=True)
+                            logger.error(f"Unexpected error transcribing voice message: {e}", exc_info=True)
                             await event.reply("Извините, не удалось распознать голосовое сообщение. Попробуйте отправить текстом.")
                             return
                     else:
@@ -994,9 +1040,11 @@ class TelegramUserClient:
                                     start_time=extracted_time,
                                     end_time=end_time,
                                 )
+                                # Логируем время в локальной таймзоне для читаемости
                                 logger.info(
-                                    f"✅ Consultation event created: {event_id} at {extracted_time}"
+                                    f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} (local timezone: {self.calendar.timezone_name})"
                                 )
+                                # Отправляем пользователю сообщение с локальным временем
                                 await event.reply(
                                     f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!"
                                 )

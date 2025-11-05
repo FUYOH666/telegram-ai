@@ -2,10 +2,11 @@
 
 import logging
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 
+import pytz
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -28,6 +29,7 @@ class GoogleCalendar:
         auto_create_consultations: bool = True,
         default_consultation_duration_minutes: int = 60,
         available_slots: Optional[List[str]] = None,
+        timezone_name: str = "Europe/Moscow",
     ):
         """
         Инициализация Google Calendar клиента.
@@ -38,6 +40,7 @@ class GoogleCalendar:
             auto_create_consultations: Автоматически создавать встречи при запросах
             default_consultation_duration_minutes: Длительность консультации по умолчанию (минуты)
             available_slots: Доступные слоты времени (например, ["09:00", "10:00", "14:00"])
+            timezone_name: Название часового пояса (например, "Europe/Moscow")
         """
         self.credentials_path = Path(credentials_path)
         self.token_path = Path(token_path)
@@ -52,6 +55,12 @@ class GoogleCalendar:
             "15:00",
             "16:00",
         ]
+        self.timezone_name = timezone_name
+        try:
+            self.timezone = pytz.timezone(timezone_name)
+        except pytz.exceptions.UnknownTimeZoneError:
+            logger.warning(f"Unknown timezone: {timezone_name}, using UTC")
+            self.timezone = pytz.UTC
 
         # Создаем директорию для токенов если её нет
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,21 +125,36 @@ class GoogleCalendar:
             HttpError: При ошибке API
         """
         if start_time is None:
-            start_time = datetime.utcnow() + timedelta(hours=1)
+            # Дефолтное время: через час от текущего момента в локальной таймзоне
+            now_local = datetime.now(self.timezone)
+            start_time = now_local + timedelta(hours=1)
+        else:
+            # Если переданное время naive (без таймзоны), считаем его локальным временем
+            if start_time.tzinfo is None:
+                start_time = self.timezone.localize(start_time)
 
         if end_time is None:
-            end_time = start_time + timedelta(hours=1)
+            end_time = start_time + timedelta(minutes=self.default_consultation_duration_minutes)
+        else:
+            # Если переданное время naive (без таймзоны), считаем его локальным временем
+            if end_time.tzinfo is None:
+                end_time = self.timezone.localize(end_time)
+
+        # Google Calendar API ожидает время в формате ISO 8601 с указанием таймзоны
+        # Форматируем время: убираем таймзону из ISO строки, так как timeZone указывается отдельно
+        start_iso = start_time.strftime("%Y-%m-%dT%H:%M:%S")
+        end_iso = end_time.strftime("%Y-%m-%dT%H:%M:%S")
 
         event = {
             "summary": summary,
             "description": description,
             "start": {
-                "dateTime": start_time.isoformat() + "Z",
-                "timeZone": "UTC",
+                "dateTime": start_iso,
+                "timeZone": self.timezone_name,
             },
             "end": {
-                "dateTime": end_time.isoformat() + "Z",
-                "timeZone": "UTC",
+                "dateTime": end_iso,
+                "timeZone": self.timezone_name,
             },
         }
 
@@ -239,8 +263,20 @@ class GoogleCalendar:
             message: Текст сообщения
 
         Returns:
-            datetime объект с временем или None если время не найдено
+            datetime объект с временем (в локальной таймзоне) или None если время не найдено
         """
+        message_lower = message.lower()
+        
+        # Проверяем наличие слова "завтра"
+        is_tomorrow = any(word in message_lower for word in ["завтра", "tomorrow"])
+        
+        # Получаем текущее время в локальной таймзоне
+        now = datetime.now(self.timezone)
+        if is_tomorrow:
+            target_date = (now + timedelta(days=1)).date()
+        else:
+            target_date = now.date()
+
         # Паттерны для поиска времени
         time_patterns = [
             r"(\d{1,2}):(\d{2})",  # "14:30", "9:00"
@@ -249,30 +285,49 @@ class GoogleCalendar:
             r"в (\d{1,2}) часов",  # "в 14 часов"
         ]
 
-        now = datetime.now()
-        today = now.date()
+        extracted_hour = None
+        extracted_minute = 0
 
         for pattern in time_patterns:
-            match = re.search(pattern, message.lower())
+            match = re.search(pattern, message_lower)
             if match:
                 try:
                     if ":" in match.group(0):
                         # Формат "14:30"
-                        hour = int(match.group(1))
-                        minute = int(match.group(2))
+                        extracted_hour = int(match.group(1))
+                        extracted_minute = int(match.group(2))
                     else:
                         # Формат "14 часов"
-                        hour = int(match.group(1))
-                        minute = 0
+                        extracted_hour = int(match.group(1))
+                        extracted_minute = 0
 
-                    if 0 <= hour < 24 and 0 <= minute < 60:
-                        extracted_time = datetime.combine(today, time(hour, minute))
-                        # Если время уже прошло сегодня, предлагаем на завтра
-                        if extracted_time < now:
-                            extracted_time += timedelta(days=1)
-                        return extracted_time
+                    if 0 <= extracted_hour < 24 and 0 <= extracted_minute < 60:
+                        break
                 except (ValueError, IndexError):
                     continue
+
+        # Если время найдено, создаем datetime
+        if extracted_hour is not None:
+            extracted_time = self.timezone.localize(
+                datetime.combine(target_date, time(extracted_hour, extracted_minute))
+            )
+            # Если время уже прошло сегодня (и не завтра), предлагаем на завтра
+            if not is_tomorrow and extracted_time < now:
+                extracted_time = self.timezone.localize(
+                    datetime.combine(target_date + timedelta(days=1), time(extracted_hour, extracted_minute))
+                )
+            logger.debug(f"Extracted time from message: {extracted_time} (local timezone: {self.timezone_name})")
+            return extracted_time.replace(tzinfo=None)  # Возвращаем naive datetime для совместимости
+        
+        # Если найдено "завтра", но время не указано - используем первое доступное время (10:00)
+        if is_tomorrow:
+            default_hour = 10
+            default_minute = 0
+            extracted_time = self.timezone.localize(
+                datetime.combine(target_date, time(default_hour, default_minute))
+            )
+            logger.debug(f"Found 'tomorrow' without time, using default {default_hour}:{default_minute:02d}")
+            return extracted_time.replace(tzinfo=None)  # Возвращаем naive datetime для совместимости
 
         return None
 
