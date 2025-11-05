@@ -1,0 +1,28 @@
+telegram:
+  api_id: ${TELEGRAM_API_ID}
+  api_hash: ${TELEGRAM_API_HASH}
+  phone: ${TELEGRAM_PHONE}
+  session_path: ./sessions/scanovichai.session
+  # Фильтры для обработки сообщений
+  handle_private_chats: true  # личные чаты
+  handle_groups: false  # группы
+  handle_channels: false  # каналы
+
+ai_server:
+  base_url: http://100.93.82.48:8000
+  api_key: ${AI_SERVER_API_KEY}  # опционально
+  model: Qwen3-30B-A3B-Instruct-2507-AWQ-4bit
+  timeout: 30
+  max_retries: 3
+  max_tokens: 4096  # с учетом max_model_len=16384
+
+memory:
+  db_path: ./data/conversations.db
+  context_window: 10  # последних N сообщений для контекста
+  max_history_days: 30
+
+google_calendar:
+  enabled: ${GOOGLE_CALENDAR_ENABLED:false}
+  credentials_path: ./credentials/google-calendar.json
+  token_path: ./credentials/token.json
+
