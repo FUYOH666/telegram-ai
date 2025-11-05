@@ -278,9 +278,29 @@ class TelegramUserClient:
         @self.client.on(events.NewMessage)
         async def handle_new_message(event: events.NewMessage.Event):
             """Обработчик новых сообщений."""
+            # Логируем ВСЕ сообщения в самом начале, до любых проверок
+            logger.info(
+                f"🔔 EVENT RECEIVED: message_id={event.message.id}, "
+                f"out={event.message.out}, "
+                f"date={event.message.date}, "
+                f"chat_id={event.chat_id}, "
+                f"is_private={event.is_private}, "
+                f"is_group={event.is_group}, "
+                f"media={type(event.message.media).__name__ if event.message.media else 'None'}, "
+                f"voice={bool(event.message.voice)}, "
+                f"audio={bool(event.message.audio)}, "
+                f"message_text={str(event.message.message)[:50] if event.message.message else 'None'}"
+            )
+            
             try:
+
                 # Проверяем фильтры
                 if not self._should_handle_message(event):
+                    logger.info(
+                        f"⏭️  Message filtered out: out={event.message.out}, "
+                        f"is_private={event.is_private}, handle_private={self.config.telegram.handle_private_chats}, "
+                        f"is_group={event.is_group}, handle_groups={self.config.telegram.handle_groups}"
+                    )
                     return
 
                 # Получаем информацию о сообщении
@@ -289,14 +309,34 @@ class TelegramUserClient:
                 message_text = event.message.message or ""
 
                 # Обработка голосовых сообщений
-                if event.message.voice or event.message.audio:
+                # Проверяем голосовые сообщения через несколько способов для надежности
+                is_voice_message = (
+                    event.message.voice is not None
+                    or event.message.audio is not None
+                    or (event.message.media and hasattr(event.message.media, 'voice'))
+                    or (event.message.media and hasattr(event.message.media, 'document') 
+                        and hasattr(event.message.media.document, 'mime_type')
+                        and 'audio' in str(event.message.media.document.mime_type))
+                )
+
+                if is_voice_message:
+                    logger.info(
+                        f"🎤 Voice message detected from {sender.id}: "
+                        f"voice={bool(event.message.voice)}, audio={bool(event.message.audio)}, "
+                        f"media={type(event.message.media).__name__ if event.message.media else None}"
+                    )
                     if self.voice_handler and self.voice_handler.enabled:
                         try:
                             transcription_start = time.time()
-                            logger.info(f"🎤 Voice message received from {sender.id}")
+                            logger.info(f"🎤 Processing voice message from {sender.id}")
+                            # Убеждаемся что директория существует
+                            temp_audio_dir = Path("./temp_audio")
+                            temp_audio_dir.mkdir(exist_ok=True)
+                            
                             # Скачиваем аудио файл
-                            audio_path = await event.message.download_media(file="./temp_audio/")
+                            audio_path = await event.message.download_media(file=str(temp_audio_dir))
                             audio_path = Path(audio_path)
+                            logger.debug(f"Downloaded audio file to: {audio_path}")
 
                             # Конвертируем .oga в .ogg если нужно (Telegram использует .oga, но ASR сервер не принимает)
                             if audio_path.suffix.lower() == ".oga":
