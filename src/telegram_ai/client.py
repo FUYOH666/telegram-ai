@@ -18,11 +18,14 @@ from .language_detector import (
     detect_language,
     get_language_name,
     should_respond_in_language,
+    SUPPORTED_LANGUAGES,
 )
 from .memory import Memory
 from .rate_limiter import RateLimiter
 from .sales_flow import SalesFlow, SalesStage
+from .slot_extractor import SlotExtractor
 from .tools import Tools
+from .vector_memory import VectorMemory
 from .voice_handler import VoiceHandler
 from .web_search import WebSearchTool
 
@@ -49,6 +52,8 @@ class TelegramUserClient:
         self.sales_flow: Optional[SalesFlow] = None
         self.intent_classifier: Optional[IntentClassifier] = None
         self.tools: Optional[Tools] = None
+        self.slot_extractor: Optional[SlotExtractor] = None
+        self.vector_memory: Optional[VectorMemory] = None
 
         # Инициализируем компоненты
         self._init_components()
@@ -79,11 +84,27 @@ class TelegramUserClient:
             date_format=self.config.ai_server.date_format,
         )
 
+        # Vector Memory (если включен)
+        vector_memory = None
+        if self.config.memory.vector_search_enabled:
+            vector_memory = VectorMemory(
+                persist_directory=self.config.memory.vector_db_path,
+                collection_name="messages",
+                ai_client=self.ai_client,
+                enabled=self.config.memory.vector_search_enabled,
+            )
+            self.vector_memory = vector_memory
+            logger.info("VectorMemory initialized")
+
         # Memory
         self.memory = Memory(
             db_path=self.config.memory.db_path,
             context_window=self.config.memory.context_window,
             max_history_days=self.config.memory.max_history_days,
+            auto_summarize=self.config.memory.auto_summarize,
+            summary_threshold=self.config.memory.summary_threshold,
+            ai_client=self.ai_client,  # Передаем ai_client для summarization
+            vector_memory=vector_memory,  # Передаем vector_memory для векторного поиска
         )
 
         # Rate Limiter
@@ -108,13 +129,30 @@ class TelegramUserClient:
             )
             logger.info("VoiceHandler initialized")
 
+        # Slot Extractor (если включен)
+        if self.config.slot_extraction.enabled:
+            self.slot_extractor = SlotExtractor(
+                ai_client=self.ai_client,
+                enabled=self.config.slot_extraction.enabled,
+            )
+            logger.info("SlotExtractor initialized")
+        else:
+            self.slot_extractor = None
+
         # Sales Flow (если включен)
         if self.config.sales_flow.enabled:
-            self.sales_flow = SalesFlow(enabled=self.config.sales_flow.enabled)
+            self.sales_flow = SalesFlow(
+                enabled=self.config.sales_flow.enabled,
+                slot_extractor=self.slot_extractor,
+            )
             logger.info("SalesFlow initialized")
 
         # Intent Classifier (всегда включен)
-        self.intent_classifier = IntentClassifier()
+        self.intent_classifier = IntentClassifier(
+            ai_client=self.ai_client,
+            confidence_threshold=self.config.intent_classifier.confidence_threshold,
+            use_llm=self.config.intent_classifier.use_llm,
+        )
         logger.info("IntentClassifier initialized")
 
         # Web Search Tool (если включен)
@@ -330,12 +368,30 @@ class TelegramUserClient:
                     # Записываем сообщение в rate limiter после успешной проверки
                     self.rate_limiter.record_message(sender.id, message_text)
                     
-                    self.memory.save_message(
+                    saved_message = self.memory.save_message(
                         user_id=sender.id,
                         content=message_text,
                         role="user",
                         username=username,
                     )
+
+                    # Добавляем сообщение в векторное хранилище (асинхронно, не блокируем)
+                    if (
+                        self.vector_memory
+                        and self.vector_memory.enabled
+                        and saved_message
+                    ):
+                        try:
+                            await self.vector_memory.add_message(
+                                message_id=saved_message.id,
+                                user_id=sender.id,
+                                conversation_id=saved_message.conversation_id,
+                                content=message_text,
+                                role="user",
+                                timestamp=saved_message.timestamp.isoformat() if saved_message.timestamp else None,
+                            )
+                        except Exception as e:
+                            logger.debug(f"Could not add message to vector store (non-blocking): {e}")
 
                 # Определяем язык сообщения
                 detected_message_lang = detect_language(message_text) if message_text else None
@@ -368,11 +424,60 @@ class TelegramUserClient:
                     user_context_data = json.dumps(context_dict)
                     self.memory.save_user_context(sender.id, user_context_data)
 
+                # Автоматическое создание summary для старых сообщений (если нужно)
+                if self.memory.auto_summarize and self.memory.ai_client:
+                    try:
+                        cutoff_id = self.memory.should_create_summary(sender.id)
+                        if cutoff_id is not None:
+                            logger.info(
+                                f"Creating summary for user_id={sender.id}, cutoff_message_id={cutoff_id}"
+                            )
+                            await self.memory.summarize_old_messages(sender.id, cutoff_id)
+                    except Exception as e:
+                        logger.error(f"Error creating summary: {e}", exc_info=True)
+                        # Продолжаем работу даже если summary не создался
+
                 # Получаем контекст
                 context = self.memory.get_context(sender.id)
 
+                # Если включен векторный поиск - добавляем релевантные сообщения из истории
+                if (
+                    self.vector_memory
+                    and self.vector_memory.enabled
+                    and message_text
+                    and len(message_text.split()) > 3  # Только для достаточно длинных запросов
+                ):
+                    try:
+                        relevant_messages = await self.memory.get_relevant_context(
+                            user_id=sender.id,
+                            query=message_text,
+                            limit=3,  # Добавляем 3 наиболее релевантных сообщения
+                        )
+                        # Добавляем релевантные сообщения в начало контекста (после summary если есть)
+                        # Проверяем, есть ли уже summary (он всегда первый)
+                        if relevant_messages:
+                            if context and context[0].get("role") == "system" and "Резюме" in context[0].get("content", ""):
+                                # Summary есть, добавляем после него
+                                context = [context[0]] + relevant_messages + context[1:]
+                            else:
+                                # Summary нет, добавляем в начало
+                                context = relevant_messages + context
+                            logger.debug(
+                                f"Added {len(relevant_messages)} relevant messages from vector search"
+                            )
+                    except Exception as e:
+                        logger.debug(f"Vector search failed (non-blocking): {e}")
+
                 # Определяем, является ли это первым сообщением в разговоре
                 is_first_message = len(context) <= 1  # Только системное сообщение или его нет
+
+                # ВАЖНО: Определяем язык для ответа на основе ПОСЛЕДНЕГО сообщения пользователя
+                # Используем detected_message_lang как приоритетный (язык текущего сообщения)
+                # Если текущее сообщение не определено, используем response_lang из контекста
+                language_for_response = detected_message_lang if detected_message_lang else response_lang
+                if language_for_response and language_for_response in SUPPORTED_LANGUAGES:
+                    response_lang = language_for_response
+                # Если язык не определен, оставляем response_lang как есть (может быть None или "ru")
 
                 # Классификация намерений
                 current_intent = None
@@ -384,12 +489,16 @@ class TelegramUserClient:
                         pass
 
                 if self.intent_classifier:
-                    detected_intent = self.intent_classifier.classify(
+                    # Используем LLM-based классификацию с confidence scores
+                    detected_intent, confidence = await self.intent_classifier.classify_with_confidence(
                         message_text, current_intent
                     )
                     if detected_intent.value != current_intent or not current_intent:
                         if detected_intent.value != current_intent:
-                            logger.info(f"Intent detected: {current_intent} -> {detected_intent.value}")
+                            logger.info(
+                                f"Intent detected: {current_intent} -> {detected_intent.value} "
+                                f"(confidence={confidence:.2f})"
+                            )
                         
                         # Обновляем intent в контексте
                         if self.sales_flow and self.sales_flow.enabled:
@@ -481,6 +590,17 @@ class TelegramUserClient:
                             user_context_data = self.sales_flow.update_stage(None, current_stage)
                             self.memory.save_user_context(sender.id, user_context_data)
 
+                    # Автоматическое извлечение слотов из сообщения (только для Sales/Real Estate)
+                    if current_intent in ("SALES_AI", "REAL_ESTATE") and self.sales_flow:
+                        try:
+                            user_context_data = await self.sales_flow.auto_extract_slots(
+                                message_text, user_context_data, current_intent
+                            )
+                            self.memory.save_user_context(sender.id, user_context_data)
+                        except Exception as e:
+                            logger.error(f"Error auto-extracting slots: {e}", exc_info=True)
+                            # Продолжаем работу даже если автоизвлечение не удалось
+
                     # Проверяем и запрашиваем недостающие слоты (только для Sales/Real Estate)
                     slot_prompt_addition = ""
                     if current_intent in ("SALES_AI", "REAL_ESTATE"):
@@ -502,82 +622,116 @@ class TelegramUserClient:
                     
                     # Модифицируем системный промпт для текущего этапа
                     stage_modifier = self.sales_flow.get_stage_prompt_modifier(current_stage)
-                    if stage_modifier and context:
-                        # Добавляем информацию о максимальной длине в модификатор
-                        length_info = ""
-                        if max_response_length:
-                            length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
-                        
-                        # Добавляем инструкцию о языке ответа
-                        language_instruction = ""
-                        if response_lang == "zh":
-                            # Специальная инструкция для китайского - упрощенный китайский
-                            language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
-                        elif response_lang and response_lang != "ru":
-                            lang_name = get_language_name(response_lang)
-                            language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
-                        elif response_lang == "ru":
-                            language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
-                        
-                        # Добавляем модификатор как системное сообщение
-                        modified_context = context.copy()
-                        # Для китайского языка инструкция должна быть первой (максимальный приоритет)
-                        if response_lang == "zh" and language_instruction:
-                            full_modifier = language_instruction + "\n\n" + stage_modifier + length_info + slot_prompt_addition
-                        else:
-                            full_modifier = stage_modifier + length_info + language_instruction + slot_prompt_addition
-                        
-                        # Обновляем или добавляем системное сообщение
-                        system_found = False
-                        for msg in modified_context:
-                            if msg.get("role") == "system":
-                                msg["content"] = full_modifier + "\n\n" + msg.get("content", "")
-                                system_found = True
-                                break
-                        if not system_found:
-                            modified_context.insert(0, {"role": "system", "content": full_modifier})
-                        context = modified_context
-                    elif response_lang and response_lang != "ru" and context:
-                        # Если нет stage_modifier, но язык не русский - добавляем инструкцию о языке
-                        if response_lang == "zh":
-                            # Специальная инструкция для китайского - упрощенный китайский
-                            language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
-                        else:
-                            lang_name = get_language_name(response_lang)
-                            language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
-                        modified_context = context.copy()
-                        system_found = False
-                        for msg in modified_context:
-                            if msg.get("role") == "system":
-                                # Для китайского языка инструкция должна быть первой (максимальный приоритет)
-                                if response_lang == "zh":
-                                    msg["content"] = language_instruction + "\n\n" + msg.get("content", "")
-                                else:
-                                    msg["content"] = language_instruction + "\n\n" + msg.get("content", "")
-                                system_found = True
-                                break
-                        if not system_found:
-                            modified_context.insert(0, {"role": "system", "content": language_instruction})
-                        context = modified_context
                     
-                    # ВАЖНО: Для китайского языка проверяем, что инструкция добавлена (fallback на случай если пропустили выше)
+                    # Формируем инструкции (будет добавлено ПОСЛЕ основного промпта)
+                    length_info = ""
+                    if max_response_length:
+                        length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
+                    
+                    # ВАЖНО: Добавляем инструкцию о языке ВСЕГДА на основе последнего сообщения
+                    language_instruction = ""
                     if response_lang == "zh":
-                        chinese_instruction_text = "упрощенном китайском"
-                        has_chinese_instruction = any(
-                            msg.get("role") == "system" and chinese_instruction_text in msg.get("content", "")
-                            for msg in context
-                        )
-                        if not has_chinese_instruction:
-                            chinese_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
-                            # Ищем системное сообщение и добавляем инструкцию в начало
-                            system_found = False
-                            for msg in context:
-                                if msg.get("role") == "system":
-                                    msg["content"] = chinese_instruction + "\n\n" + msg.get("content", "")
-                                    system_found = True
-                                    break
-                            if not system_found:
-                                context.insert(0, {"role": "system", "content": chinese_instruction})
+                        # Специальная инструкция для китайского - упрощенный китайский
+                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
+                    elif response_lang and response_lang in SUPPORTED_LANGUAGES:
+                        lang_name = get_language_name(response_lang)
+                        language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на другие языки, если пользователь пишет на конкретном языке."
+                    elif not response_lang or response_lang == "ru":
+                        # По умолчанию русский язык
+                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
+                    
+                    # Формируем модификаторы для добавления ПОСЛЕ основного промпта
+                    if stage_modifier:
+                        full_modifier = language_instruction + "\n\n" + stage_modifier + length_info + slot_prompt_addition
+                    else:
+                        full_modifier = language_instruction + length_info + slot_prompt_addition
+                    
+                    # Обновляем или добавляем системное сообщение
+                    # ВАЖНО: Структура должна быть: Дата -> Основной промпт -> Модификаторы
+                    # Дата добавляется в ai_client.py в начало системного сообщения
+                    # Основной промпт должен быть ПЕРВЫМ в системном сообщении, модификаторы ПОСЛЕ него
+                    modified_context = context.copy()
+                    system_found = False
+                    main_prompt = self.ai_client.system_prompt or ""
+                    
+                    for msg in modified_context:
+                        if msg.get("role") == "system":
+                            content = msg.get("content", "")
+                            # Проверяем, есть ли уже основной промпт
+                            has_main_prompt = (
+                                "Александр" in content and 
+                                "Scanovich.ai" in content and
+                                "Принципы общения" in content
+                            )
+                            
+                            if has_main_prompt:
+                                # Основной промпт уже есть - добавляем модификаторы ПОСЛЕ него
+                                msg["content"] = content + "\n\n" + full_modifier
+                            else:
+                                # Основного промпта нет - добавляем его сначала, затем модификаторы
+                                if main_prompt:
+                                    msg["content"] = main_prompt + "\n\n" + full_modifier
+                                else:
+                                    msg["content"] = content + "\n\n" + full_modifier
+                            system_found = True
+                            break
+                    
+                    if not system_found:
+                        # Системного сообщения нет - создаем с основным промптом и модификаторами
+                        # Дата будет добавлена в ai_client.py в начало
+                        if main_prompt:
+                            system_content = main_prompt + "\n\n" + full_modifier
+                        else:
+                            system_content = full_modifier
+                        modified_context.insert(0, {"role": "system", "content": system_content})
+                    
+                    context = modified_context
+                else:
+                    # Sales flow отключен - добавляем только инструкцию о языке
+                    language_instruction = ""
+                    if response_lang == "zh":
+                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
+                    elif response_lang and response_lang in SUPPORTED_LANGUAGES:
+                        lang_name = get_language_name(response_lang)
+                        language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на другие языки, если пользователь пишет на конкретном языке."
+                    elif not response_lang or response_lang == "ru":
+                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
+                    
+                    # Добавляем инструкцию о языке к системному сообщению
+                    modified_context = context.copy()
+                    system_found = False
+                    main_prompt = self.ai_client.system_prompt or ""
+                    
+                    for msg in modified_context:
+                        if msg.get("role") == "system":
+                            content = msg.get("content", "")
+                            has_main_prompt = (
+                                "Александр" in content and 
+                                "Scanovich.ai" in content and
+                                "Принципы общения" in content
+                            )
+                            
+                            if has_main_prompt:
+                                # Основной промпт есть - добавляем инструкцию о языке ПОСЛЕ него
+                                msg["content"] = content + language_instruction
+                            else:
+                                # Основного промпта нет - добавляем его сначала, затем инструкцию о языке
+                                if main_prompt:
+                                    msg["content"] = main_prompt + language_instruction
+                                else:
+                                    msg["content"] = content + language_instruction
+                            system_found = True
+                            break
+                    
+                    if not system_found:
+                        # Системного сообщения нет - создаем с основным промптом и инструкцией о языке
+                        if main_prompt:
+                            system_content = main_prompt + language_instruction
+                        else:
+                            system_content = language_instruction
+                        modified_context.insert(0, {"role": "system", "content": system_content})
+                    
+                    context = modified_context
 
                 # Проверяем, нужен ли веб-поиск (по ключевым словам)
                 web_search_results = None
@@ -669,12 +823,30 @@ class TelegramUserClient:
                     logger.info(f"✅ Reply sent to user {sender.id}")
 
                     # Сохраняем ответ ассистента
-                    self.memory.save_message(
+                    saved_response = self.memory.save_message(
                         user_id=sender.id,
                         content=response,
                         role="assistant",
                         username=username,
                     )
+
+                    # Добавляем ответ ассистента в векторное хранилище (асинхронно, не блокируем)
+                    if (
+                        self.vector_memory
+                        and self.vector_memory.enabled
+                        and saved_response
+                    ):
+                        try:
+                            await self.vector_memory.add_message(
+                                message_id=saved_response.id,
+                                user_id=sender.id,
+                                conversation_id=saved_response.conversation_id,
+                                content=response,
+                                role="assistant",
+                                timestamp=saved_response.timestamp.isoformat() if saved_response.timestamp else None,
+                            )
+                        except Exception as e:
+                            logger.debug(f"Could not add response to vector store (non-blocking): {e}")
 
                     # Автоматическое сохранение лида если заполнены ключевые слоты
                     if (

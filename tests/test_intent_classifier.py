@@ -1,5 +1,7 @@
 """Тесты для IntentClassifier."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from telegram_ai.intent_classifier import IntentClassifier, Intent
@@ -7,8 +9,16 @@ from telegram_ai.intent_classifier import IntentClassifier, Intent
 
 @pytest.fixture
 def intent_classifier():
-    """Создать IntentClassifier для тестов."""
-    return IntentClassifier()
+    """Создать IntentClassifier для тестов (без LLM)."""
+    return IntentClassifier(use_llm=False)
+
+
+@pytest.fixture
+def intent_classifier_with_llm():
+    """Создать IntentClassifier с моком LLM для тестов."""
+    ai_client = MagicMock()
+    ai_client.get_response = AsyncMock(return_value='{"intent": "SALES_AI", "confidence": 0.9, "reasoning": "test"}')
+    return IntentClassifier(ai_client=ai_client, use_llm=True, confidence_threshold=0.7)
 
 
 def test_intent_classifier_initialization(intent_classifier):
@@ -92,4 +102,55 @@ def test_classify_change_intent_on_explicit_signals(intent_classifier):
     
     # Даже если текущее намерение Real Estate, но есть явные признаки Sales AI - меняем
     assert intent_classifier.classify("Нужен чат-бот", current_intent="REAL_ESTATE") == Intent.SALES_AI
+
+
+@pytest.mark.asyncio
+async def test_classify_with_confidence_keyword_fallback(intent_classifier):
+    """Тест classify_with_confidence с fallback на keyword-based."""
+    intent, confidence = await intent_classifier.classify_with_confidence("Мне нужен чат-бот")
+    assert intent == Intent.SALES_AI
+    assert 0.0 <= confidence <= 1.0
+    assert confidence == 0.6  # keyword-based дает фиксированную уверенность 0.6
+
+
+@pytest.mark.asyncio
+async def test_classify_with_confidence_llm_success(intent_classifier_with_llm):
+    """Тест classify_with_confidence с успешным LLM ответом."""
+    intent, confidence = await intent_classifier_with_llm.classify_with_confidence("Мне нужен чат-бот")
+    assert intent == Intent.SALES_AI
+    assert confidence == 0.9
+
+
+@pytest.mark.asyncio
+async def test_classify_with_confidence_llm_low_confidence_fallback(intent_classifier_with_llm):
+    """Тест fallback на keyword-based при низкой уверенности LLM."""
+    # Мокаем низкую уверенность
+    intent_classifier_with_llm.ai_client.get_response = AsyncMock(
+        return_value='{"intent": "SALES_AI", "confidence": 0.5, "reasoning": "uncertain"}'
+    )
+    
+    intent, confidence = await intent_classifier_with_llm.classify_with_confidence("Мне нужен чат-бот")
+    assert intent == Intent.SALES_AI
+    # Должен быть fallback, confidence будет средним между LLM (0.5) и keyword-based (0.6)
+    assert confidence < 0.7  # Должен быть ниже порога
+
+
+@pytest.mark.asyncio
+async def test_classify_with_confidence_llm_json_error_fallback(intent_classifier_with_llm):
+    """Тест fallback при ошибке парсинга JSON от LLM."""
+    intent_classifier_with_llm.ai_client.get_response = AsyncMock(
+        return_value="Not a valid JSON response"
+    )
+    
+    intent, confidence = await intent_classifier_with_llm.classify_with_confidence("Мне нужен чат-бот")
+    assert intent == Intent.SALES_AI  # Fallback на keyword-based
+    assert confidence == 0.5  # При ошибке даем низкую уверенность
+
+
+@pytest.mark.asyncio
+async def test_classify_with_confidence_empty_message(intent_classifier):
+    """Тест classify_with_confidence для пустого сообщения."""
+    intent, confidence = await intent_classifier.classify_with_confidence("")
+    assert intent == Intent.SMALL_TALK
+    assert confidence == 0.5
 

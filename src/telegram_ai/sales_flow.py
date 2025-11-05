@@ -127,14 +127,16 @@ class SalesFlow:
         "встретиться",
     ]
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = True, slot_extractor=None):
         """
         Инициализация SalesFlow.
 
         Args:
             enabled: Включить скрипт продаж
+            slot_extractor: Экземпляр SlotExtractor для автоматического извлечения слотов
         """
         self.enabled = enabled
+        self.slot_extractor = slot_extractor
         logger.info(f"SalesFlow initialized: enabled={enabled}")
 
     def get_stage(self, context_data: Optional[str]) -> SalesStage:
@@ -455,6 +457,71 @@ class SalesFlow:
             return data.get("slots", {})
         except (json.JSONDecodeError, ValueError):
             return {}
+
+    async def auto_extract_slots(
+        self, message: str, context_data: Optional[str], intent: Optional[str] = None
+    ) -> str:
+        """
+        Автоматически извлечь слоты из сообщения с помощью LLM и обновить контекст.
+
+        Args:
+            message: Сообщение пользователя
+            context_data: Текущий JSON контекст
+            intent: Тип намерения ("SALES_AI" или "REAL_ESTATE")
+
+        Returns:
+            Обновленный JSON контекст с заполненными слотами
+        """
+        if not self.slot_extractor or not self.slot_extractor.enabled:
+            return context_data or "{}"
+
+        if not intent:
+            if context_data:
+                try:
+                    data = json.loads(context_data)
+                    intent = data.get("intent", "SALES_AI")
+                except (json.JSONDecodeError, ValueError):
+                    intent = "SALES_AI"
+            else:
+                intent = "SALES_AI"
+
+        # Получаем список недостающих слотов
+        missing_slots = self.get_missing_slots(context_data, intent)
+        if not missing_slots:
+            # Все слоты уже заполнены
+            return context_data or "{}"
+
+        # Извлекаем слоты из сообщения
+        extracted_slots = await self.slot_extractor.extract_slots(
+            message, intent, missing_slots
+        )
+
+        if not extracted_slots:
+            # Не удалось извлечь слоты
+            return context_data or "{}"
+
+        # Обновляем контекст с извлеченными слотами
+        if context_data:
+            try:
+                data = json.loads(context_data)
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = {}
+
+        if "slots" not in data:
+            data["slots"] = {}
+
+        # Обновляем только те слоты, которые были извлечены
+        for slot_name, slot_value in extracted_slots.items():
+            if slot_name in missing_slots:  # Проверяем что слот действительно был нужен
+                data["slots"][slot_name] = slot_value
+                logger.info(f"Auto-extracted slot '{slot_name}': {slot_value}")
+
+        # Пересчитываем missing_slots
+        self._update_missing_slots(data)
+
+        return json.dumps(data)
 
     def update_slot(
         self, context_data: Optional[str], slot_name: str, slot_value: Any

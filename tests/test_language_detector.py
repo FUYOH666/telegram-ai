@@ -66,7 +66,7 @@ def test_get_language_name():
     """Тест получения названия языка."""
     assert get_language_name("ru") == "русском"
     assert get_language_name("en") == "английском"
-    assert get_language_name("zh") == "китайском"
+    assert get_language_name("zh") == "упрощенном китайском (Simplified Chinese)"
     assert get_language_name("th") == "тайском"
     assert get_language_name(None) == "русском"  # По умолчанию
     assert get_language_name("unknown") == "русском"  # Неизвестный язык -> русский по умолчанию

@@ -1,8 +1,9 @@
 """Классификация намерений пользователя."""
 
+import json
 import logging
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -159,9 +160,22 @@ class IntentClassifier:
         "what's up",
     ]
 
-    def __init__(self):
-        """Инициализация классификатора."""
-        logger.info("IntentClassifier initialized")
+    def __init__(self, ai_client=None, confidence_threshold: float = 0.7, use_llm: bool = True):
+        """
+        Инициализация классификатора.
+
+        Args:
+            ai_client: Экземпляр AIClient для LLM-based классификации (опционально)
+            confidence_threshold: Минимальный порог уверенности для LLM классификации (0.0-1.0)
+            use_llm: Использовать LLM для классификации, fallback на keyword-based если False или ai_client=None
+        """
+        self.ai_client = ai_client
+        self.confidence_threshold = confidence_threshold
+        self.use_llm = use_llm
+        logger.info(
+            f"IntentClassifier initialized: use_llm={use_llm}, "
+            f"confidence_threshold={confidence_threshold}"
+        )
 
     def classify(self, message: Optional[str], current_intent: Optional[str] = None) -> Intent:
         """
@@ -237,4 +251,136 @@ class IntentClassifier:
             return Intent.SMALL_TALK
 
         return Intent.SALES_AI
+
+    def _get_intent_classification_prompt(self, message: str, current_intent: Optional[str] = None) -> str:
+        """
+        Сформировать промпт для классификации намерений через LLM.
+
+        Args:
+            message: Сообщение пользователя
+            current_intent: Текущее намерение (для контекста)
+
+        Returns:
+            Промпт для LLM
+        """
+        current_intent_context = ""
+        if current_intent:
+            current_intent_context = f"\n\nТекущее намерение в диалоге: {current_intent}"
+
+        prompt = f"""Определи намерение пользователя в следующем сообщении. Доступные типы намерений:
+
+1. SALES_AI - пользователь интересуется AI-решениями, автоматизацией, разработкой, проектами, услугами Scanovich.ai
+2. REAL_ESTATE - пользователь интересуется недвижимостью на Пхукете (виллы, кондо, покупка, аренда, инвестиции)
+3. SMALL_TALK - обычный разговор, приветствия, благодарности, общие вопросы без конкретной цели
+
+Сообщение пользователя: "{message}"{current_intent_context}
+
+Верни ответ ТОЛЬКО в формате JSON, без дополнительного текста:
+{{
+  "intent": "SALES_AI" | "REAL_ESTATE" | "SMALL_TALK",
+  "confidence": 0.0-1.0,
+  "reasoning": "краткое объяснение (1-2 предложения)"
+}}
+
+Уверенность (confidence) должна отражать насколько ты уверен в классификации:
+- 0.9-1.0 - очень уверен (явные признаки)
+- 0.7-0.9 - уверен (есть признаки)
+- 0.5-0.7 - умеренно уверен (некоторые признаки)
+- 0.0-0.5 - неуверен (недостаточно информации)
+
+Если сообщение неоднозначное или недостаточно информации, установи низкую уверенность."""
+
+        return prompt
+
+    async def classify_with_confidence(
+        self, message: Optional[str], current_intent: Optional[str] = None
+    ) -> Tuple[Intent, float]:
+        """
+        Классифицировать намерение с оценкой уверенности через LLM.
+
+        Args:
+            message: Текст сообщения пользователя
+            current_intent: Текущее намерение (для сохранения контекста)
+
+        Returns:
+            Кортеж (Intent, confidence_score)
+        """
+        if not message:
+            return Intent.SMALL_TALK, 0.5
+
+        # Если LLM недоступен или отключен - используем keyword-based классификацию
+        if not self.use_llm or not self.ai_client:
+            intent = self.classify(message, current_intent)
+            # Для keyword-based даем умеренную уверенность
+            confidence = 0.6
+            logger.debug(f"Using keyword-based classification: {intent.value} (confidence={confidence})")
+            return intent, confidence
+
+        try:
+            # Формируем промпт для классификации
+            prompt = self._get_intent_classification_prompt(message, current_intent)
+
+            # Отправляем запрос к LLM
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.ai_client.get_response(
+                messages,
+                temperature=0.2,  # Низкая температура для более детерминированной классификации
+                max_tokens=200,  # Достаточно для JSON ответа
+            )
+
+            # Парсим JSON ответ
+            response = response.strip()
+            if response.startswith("```json"):
+                response = response[7:]
+            if response.startswith("```"):
+                response = response[3:]
+            if response.endswith("```"):
+                response = response[:-3]
+            response = response.strip()
+
+            result = json.loads(response)
+
+            # Извлекаем intent и confidence
+            intent_str = result.get("intent", "SMALL_TALK")
+            confidence = float(result.get("confidence", 0.5))
+            reasoning = result.get("reasoning", "")
+
+            # Ограничиваем confidence в диапазоне [0.0, 1.0]
+            confidence = max(0.0, min(1.0, confidence))
+
+            try:
+                intent = Intent(intent_str)
+            except ValueError:
+                logger.warning(f"Unknown intent from LLM: {intent_str}, falling back to keyword-based")
+                intent = self.classify(message, current_intent)
+                confidence = 0.5
+
+            logger.debug(
+                f"LLM classification: intent={intent.value}, confidence={confidence:.2f}, "
+                f"reasoning={reasoning}"
+            )
+
+            # Если уверенность ниже порога - fallback на keyword-based
+            if confidence < self.confidence_threshold:
+                logger.debug(
+                    f"Confidence {confidence:.2f} below threshold {self.confidence_threshold}, "
+                    f"falling back to keyword-based classification"
+                )
+                intent = self.classify(message, current_intent)
+                # Используем среднее между LLM confidence и keyword-based confidence
+                confidence = (confidence + 0.6) / 2
+
+            return intent, confidence
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse intent classification JSON: {e}")
+            logger.debug(f"Response was: {response[:200]}")
+            # Fallback на keyword-based
+            intent = self.classify(message, current_intent)
+            return intent, 0.5
+        except Exception as e:
+            logger.error(f"Error in LLM-based intent classification: {e}", exc_info=True)
+            # Fallback на keyword-based
+            intent = self.classify(message, current_intent)
+            return intent, 0.5
 

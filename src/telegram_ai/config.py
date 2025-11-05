@@ -82,6 +82,18 @@ class MemoryConfig(BaseSettings):
     max_history_days: int = Field(
         default=30, description="Максимальный возраст истории в днях"
     )
+    auto_summarize: bool = Field(
+        default=True, description="Автоматически создавать summary для старых сообщений"
+    )
+    summary_threshold: int = Field(
+        default=15, description="Минимальное количество сообщений для создания summary"
+    )
+    vector_search_enabled: bool = Field(
+        default=False, description="Включить векторный поиск в истории диалогов"
+    )
+    vector_db_path: str = Field(
+        default="./data/chroma_db", description="Путь к директории ChromaDB"
+    )
 
     model_config = SettingsConfigDict(env_prefix="MEMORY_")
 
@@ -174,6 +186,16 @@ class SalesFlowConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SALES_FLOW_")
 
 
+class SlotExtractionConfig(BaseSettings):
+    """Конфигурация автоматического извлечения слотов."""
+
+    enabled: bool = Field(
+        default=True, description="Включить автоматическое извлечение слотов через LLM"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="SLOT_EXTRACTION_")
+
+
 class WebSearchConfig(BaseSettings):
     """Конфигурация Web Search MCP."""
 
@@ -197,6 +219,20 @@ class WebSearchConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="WEB_SEARCH_")
 
 
+class IntentClassifierConfig(BaseSettings):
+    """Конфигурация классификатора намерений."""
+
+    use_llm: bool = Field(
+        default=True, description="Использовать LLM для классификации намерений"
+    )
+    confidence_threshold: float = Field(
+        default=0.7,
+        description="Минимальный порог уверенности для LLM классификации (0.0-1.0)",
+    )
+
+    model_config = SettingsConfigDict(env_prefix="INTENT_CLASSIFIER_")
+
+
 class Config(BaseSettings):
     """Основная конфигурация приложения."""
 
@@ -207,7 +243,9 @@ class Config(BaseSettings):
     rate_limiting: RateLimitingConfig
     asr_server: ASRServerConfig
     sales_flow: SalesFlowConfig
+    slot_extraction: SlotExtractionConfig
     web_search: WebSearchConfig
+    intent_classifier: IntentClassifierConfig
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "Config":
@@ -257,6 +295,9 @@ class Config(BaseSettings):
         # Sales flow конфигурация
         sales_flow = SalesFlowConfig(**yaml_data.get("sales_flow", {}))
 
+        # Slot extraction конфигурация
+        slot_extraction = SlotExtractionConfig(**yaml_data.get("slot_extraction", {}))
+
         # Web Search конфигурация
         web_search_data = yaml_data.get("web_search", {})
         enabled_val = web_search_data.get("enabled", False)
@@ -266,6 +307,9 @@ class Config(BaseSettings):
             web_search_data["enabled"] = bool(enabled_val)
         web_search = WebSearchConfig(**web_search_data)
 
+        # Intent Classifier конфигурация
+        intent_classifier = IntentClassifierConfig(**yaml_data.get("intent_classifier", {}))
+
         return cls(
             telegram=telegram,
             ai_server=ai_server,
@@ -274,7 +318,9 @@ class Config(BaseSettings):
             rate_limiting=rate_limiting,
             asr_server=asr_server,
             sales_flow=sales_flow,
+            slot_extraction=slot_extraction,
             web_search=web_search,
+            intent_classifier=intent_classifier,
         )
 
     @staticmethod

@@ -83,12 +83,12 @@ class AIClient:
             f"timeouts(connect=15.0s, read={timeout}s, write=10.0s, pool=10.0s), max_retries={max_retries}"
         )
 
-    def _get_dynamic_system_prompt(self) -> str:
+    def _get_date_info(self) -> str:
         """
-        Получить системный промпт с актуальной датой и временем.
+        Получить только информацию о текущей дате и времени.
 
         Returns:
-            Системный промпт с добавленной информацией о текущей дате/времени
+            Строка с информацией о текущей дате/времени
         """
         # Получаем текущее время в UTC
         now_utc = datetime.now(timezone.utc)
@@ -137,8 +137,17 @@ class AIClient:
 
         date_str = f"{day} {month} {year} года, {weekday}, {hour:02d}:{minute:02d} (МСК)"
 
-        # Добавляем информацию о дате в начало системного промпта
-        date_info = f"Текущая дата и время: {date_str}. Используй эту дату при ответах на вопросы о времени.\n\n"
+        # Возвращаем только информацию о дате
+        return f"Текущая дата и время: {date_str}. Используй эту дату при ответах на вопросы о времени.\n\n"
+
+    def _get_dynamic_system_prompt(self) -> str:
+        """
+        Получить системный промпт с актуальной датой и временем.
+
+        Returns:
+            Системный промпт с добавленной информацией о текущей дате/времени
+        """
+        date_info = self._get_date_info()
 
         if self.system_prompt:
             return date_info + self.system_prompt
@@ -188,13 +197,28 @@ class AIClient:
         """
         url = f"{self.base_url}/v1/chat/completions"
 
-        # Добавляем системный промпт с актуальной датой если есть
+        # Всегда добавляем актуальную дату в системное сообщение
         final_messages = messages.copy()
-        dynamic_prompt = self._get_dynamic_system_prompt()
-        if dynamic_prompt:
-            # Проверяем есть ли уже системное сообщение
-            if not any(msg.get("role") == "system" for msg in final_messages):
-                final_messages.insert(0, {"role": "system", "content": dynamic_prompt})
+        date_info = self._get_date_info()
+        
+        if date_info:
+            # Ищем существующее системное сообщение
+            system_found = False
+            for msg in final_messages:
+                if msg.get("role") == "system":
+                    # Добавляем дату в начало существующего системного сообщения
+                    msg["content"] = date_info + msg["content"]
+                    system_found = True
+                    break
+            
+            # Если системного сообщения нет, добавляем основное
+            if not system_found:
+                dynamic_prompt = self._get_dynamic_system_prompt()
+                if dynamic_prompt:
+                    final_messages.insert(0, {"role": "system", "content": dynamic_prompt})
+                else:
+                    # Если нет основного промпта, добавляем только дату
+                    final_messages.insert(0, {"role": "system", "content": date_info})
 
         payload = {
             "model": self.model,
