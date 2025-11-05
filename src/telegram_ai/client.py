@@ -14,6 +14,11 @@ from .ai_client import AIClient
 from .calendar import GoogleCalendar
 from .config import Config
 from .intent_classifier import IntentClassifier
+from .language_detector import (
+    detect_language,
+    get_language_name,
+    should_respond_in_language,
+)
 from .memory import Memory
 from .rate_limiter import RateLimiter
 from .sales_flow import SalesFlow, SalesStage
@@ -225,9 +230,19 @@ class TelegramUserClient:
                                 audio_path = ogg_path
                                 logger.debug(f"Renamed .oga to .ogg: {audio_path}")
 
-                            # Транскрибируем
+                            # Определяем язык для транскрибации из контекста пользователя
+                            user_context_data = self.memory.get_user_context(sender.id)
+                            asr_language = "ru"  # По умолчанию
+                            if user_context_data:
+                                try:
+                                    context_dict = json.loads(user_context_data)
+                                    asr_language = context_dict.get("lang", "ru")
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                            
+                            # Транскрибируем с учетом языка пользователя
                             transcribed_text = await self.voice_handler.transcribe_voice(
-                                audio_path, language="ru"
+                                audio_path, language=asr_language
                             )
                             transcription_time = time.time() - transcription_start
                             logger.info(f"✅ Transcribed in {transcription_time:.2f}s: {transcribed_text[:100]}...")
@@ -322,6 +337,37 @@ class TelegramUserClient:
                         username=username,
                     )
 
+                # Определяем язык сообщения
+                detected_message_lang = detect_language(message_text) if message_text else None
+                
+                # Получаем текущий язык из контекста
+                user_context_data = self.memory.get_user_context(sender.id)
+                current_lang = None
+                if user_context_data:
+                    try:
+                        context_dict = json.loads(user_context_data)
+                        current_lang = context_dict.get("lang")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                
+                # Определяем язык для ответа (это уже нормализованный язык - только ru, en, zh, th)
+                response_lang = should_respond_in_language(detected_message_lang, current_lang)
+                
+                # Сохраняем язык в контексте только если он изменился или еще не установлен
+                # Важно: сохраняем response_lang (нормализованный), а не detected_message_lang (может быть неподдерживаемым)
+                if response_lang != current_lang:
+                    logger.info(f"Language detected: {response_lang} (was {current_lang}, detected: {detected_message_lang})")
+                    if user_context_data:
+                        try:
+                            context_dict = json.loads(user_context_data)
+                        except (json.JSONDecodeError, ValueError):
+                            context_dict = {}
+                    else:
+                        context_dict = {}
+                    context_dict["lang"] = response_lang  # Сохраняем нормализованный язык
+                    user_context_data = json.dumps(context_dict)
+                    self.memory.save_user_context(sender.id, user_context_data)
+
                 # Получаем контекст
                 context = self.memory.get_context(sender.id)
 
@@ -329,7 +375,6 @@ class TelegramUserClient:
                 is_first_message = len(context) <= 1  # Только системное сообщение или его нет
 
                 # Классификация намерений
-                user_context_data = self.memory.get_user_context(sender.id)
                 current_intent = None
                 if user_context_data:
                     try:
@@ -377,16 +422,49 @@ class TelegramUserClient:
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
                     
-                    # Специальная логика: если пользователь пишет "привет" - всегда сбрасываем на GREETING
+                    # Специальная логика: если пользователь пишет приветствие - всегда сбрасываем на GREETING
                     # (независимо от истории, это сигнал начала нового диалога)
                     message_lower = message_text.lower().strip()
-                    greeting_keywords = ["привет", "здравствуй", "здравствуйте", "добрый", "начать"]
+                    greeting_keywords = [
+                        "привет",
+                        "здравствуй",
+                        "здравствуйте",
+                        "добрый",
+                        "начать",
+                        # Английские приветствия
+                        "hi",
+                        "hello",
+                        "hey",
+                        "good morning",
+                        "good afternoon",
+                        "good evening",
+                    ]
                     if any(keyword in message_lower for keyword in greeting_keywords):
                         if current_stage != SalesStage.GREETING:
                             logger.info(f"Greeting detected, resetting stage to GREETING (was {current_stage.value})")
                             current_stage = SalesStage.GREETING
                             user_context_data = self.sales_flow.update_stage(user_context_data, current_stage)
                             self.memory.save_user_context(sender.id, user_context_data)
+                        
+                        # При приветствии сбрасываем intent на SMALL_TALK (если не было явных признаков другого intent)
+                        if self.intent_classifier:
+                            detected_intent = self.intent_classifier.classify(message_text, None)  # Без сохранения старого intent
+                            if detected_intent.value != current_intent:
+                                logger.info(f"Resetting intent to {detected_intent.value} on greeting (was {current_intent})")
+                                if self.sales_flow and self.sales_flow.enabled:
+                                    user_context_data = self.sales_flow.update_intent(user_context_data, detected_intent.value)
+                                else:
+                                    if user_context_data:
+                                        try:
+                                            context_dict = json.loads(user_context_data)
+                                        except (json.JSONDecodeError, ValueError):
+                                            context_dict = {}
+                                    else:
+                                        context_dict = {}
+                                    context_dict["intent"] = detected_intent.value
+                                    user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                                current_intent = detected_intent.value
                     
                     # Определяем переход на следующий этап
                     new_stage = self.sales_flow.detect_stage_transition(
@@ -430,19 +508,41 @@ class TelegramUserClient:
                         if max_response_length:
                             length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
                         
+                        # Добавляем инструкцию о языке ответа
+                        language_instruction = ""
+                        if response_lang and response_lang != "ru":
+                            lang_name = get_language_name(response_lang)
+                            language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
+                        elif response_lang == "ru":
+                            language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
+                        
                         # Добавляем модификатор как системное сообщение
                         modified_context = context.copy()
                         # Обновляем или добавляем системное сообщение
                         system_found = False
                         for msg in modified_context:
                             if msg.get("role") == "system":
-                                full_modifier = stage_modifier + length_info + slot_prompt_addition
+                                full_modifier = stage_modifier + length_info + language_instruction + slot_prompt_addition
                                 msg["content"] = full_modifier + "\n\n" + msg.get("content", "")
                                 system_found = True
                                 break
                         if not system_found:
-                            full_modifier = stage_modifier + length_info + slot_prompt_addition
+                            full_modifier = stage_modifier + length_info + language_instruction + slot_prompt_addition
                             modified_context.insert(0, {"role": "system", "content": full_modifier})
+                        context = modified_context
+                    elif response_lang and response_lang != "ru" and context:
+                        # Если нет stage_modifier, но язык не русский - добавляем инструкцию о языке
+                        lang_name = get_language_name(response_lang)
+                        language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на русский, если пользователь пишет на другом языке."
+                        modified_context = context.copy()
+                        system_found = False
+                        for msg in modified_context:
+                            if msg.get("role") == "system":
+                                msg["content"] = language_instruction + "\n\n" + msg.get("content", "")
+                                system_found = True
+                                break
+                        if not system_found:
+                            modified_context.insert(0, {"role": "system", "content": language_instruction})
                         context = modified_context
 
                 # Проверяем, нужен ли веб-поиск (по ключевым словам)
@@ -628,12 +728,14 @@ class TelegramUserClient:
                                 f"Error creating consultation event: {e}", exc_info=True
                             )
 
-                except httpx.TimeoutException as e:
-                    logger.error(f"Timeout connecting to AI server: {e}", exc_info=True)
-                    await event.reply("⏱️ Таймаут подключения к AI серверу. Сервер недоступен или перегружен. Попробуйте позже.")
                 except httpx.ReadTimeout as e:
+                    # ReadTimeout должен обрабатываться ПЕРВЫМ, так как он является подклассом TimeoutException
                     logger.error(f"Read timeout from AI server: {e}", exc_info=True)
                     await event.reply("⏱️ AI сервер не успел сгенерировать ответ за отведенное время. Попробуйте позже или переформулируйте запрос.")
+                except httpx.TimeoutException as e:
+                    # TimeoutException (включая ConnectTimeout) обрабатывается после ReadTimeout
+                    logger.error(f"Timeout connecting to AI server: {e}", exc_info=True)
+                    await event.reply("⏱️ Таймаут подключения к AI серверу. Сервер недоступен или перегружен. Попробуйте позже.")
                 except httpx.NetworkError as e:
                     logger.error(f"Network error: {e}", exc_info=True)
                     await event.reply("🌐 Ошибка сети при подключении к AI серверу. Проверьте интернет-соединение.")

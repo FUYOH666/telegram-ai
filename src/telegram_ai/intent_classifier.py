@@ -146,6 +146,17 @@ class IntentClassifier:
         "отлично",
         "хорошо",
         "плохо",
+        # Английские приветствия
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "thanks",
+        "thank you",
+        "how are you",
+        "what's up",
     ]
 
     def __init__(self):

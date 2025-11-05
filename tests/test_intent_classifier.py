@@ -36,10 +36,18 @@ def test_classify_real_estate(intent_classifier):
 
 def test_classify_small_talk(intent_classifier):
     """Тест классификации Small Talk."""
-    # Явные ключевые слова
+    # Явные ключевые слова (русские)
     assert intent_classifier.classify("Привет") == Intent.SMALL_TALK
     assert intent_classifier.classify("Как дела?") == Intent.SMALL_TALK
     assert intent_classifier.classify("Спасибо за помощь") == Intent.SMALL_TALK
+    
+    # Английские приветствия
+    assert intent_classifier.classify("Hi") == Intent.SMALL_TALK
+    assert intent_classifier.classify("Hello") == Intent.SMALL_TALK
+    assert intent_classifier.classify("Hey") == Intent.SMALL_TALK
+    assert intent_classifier.classify("Good morning") == Intent.SMALL_TALK
+    assert intent_classifier.classify("Thanks") == Intent.SMALL_TALK
+    assert intent_classifier.classify("How are you?") == Intent.SMALL_TALK
 
 
 def test_classify_empty_message(intent_classifier):
