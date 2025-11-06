@@ -355,6 +355,26 @@ class TelegramUserClient:
                     chat_type = "channel"
                     chat_type_limit = self.config.rate_limiting.chat_type_limits.channel
 
+                # Проверяем неподдерживаемые типы медиа (стикеры, фото, видео и т.д.) - игнорируем их
+                is_sticker = event.message.sticker is not None
+                is_photo = event.message.photo is not None
+                is_video = event.message.video is not None
+                is_gif = event.message.gif is not None
+                is_video_note = event.message.video_note is not None
+                is_contact = event.message.contact is not None
+                is_location = event.message.geo is not None
+                is_poll = event.message.poll is not None
+                
+                # Если это неподдерживаемый тип медиа - просто игнорируем без ответа (более естественно)
+                if is_sticker or is_photo or is_video or is_gif or is_video_note or is_contact or is_location or is_poll:
+                    logger.debug(
+                        f"📎 Ignoring unsupported media type from {sender.id}: "
+                        f"sticker={is_sticker}, photo={is_photo}, video={is_video}, "
+                        f"gif={is_gif}, video_note={is_video_note}, contact={is_contact}, "
+                        f"location={is_location}, poll={is_poll}"
+                    )
+                    return  # Игнорируем без ответа - более естественное поведение
+                
                 # Обработка голосовых сообщений
                 # Проверяем голосовые сообщения через несколько способов для надежности
                 is_voice_message = (
