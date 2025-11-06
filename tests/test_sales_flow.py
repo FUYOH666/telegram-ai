@@ -139,23 +139,32 @@ def test_sales_flow_get_stage_max_length(sales_flow):
     max_length = sales_flow.get_stage_max_length(SalesStage.GREETING)
     assert max_length == 150
 
+    # PRESENTATION и NEEDS_DISCOVERY теперь без лимита (None)
     max_length = sales_flow.get_stage_max_length(SalesStage.PRESENTATION)
-    assert max_length == 500
+    assert max_length is None
+
+    max_length = sales_flow.get_stage_max_length(SalesStage.NEEDS_DISCOVERY)
+    assert max_length is None
 
     # Для несуществующего этапа должно вернуться None
     from telegram_ai.sales_flow import SalesStage as SS
 
     # Проверяем что метод работает для всех этапов
+    # NEEDS_DISCOVERY и PRESENTATION теперь без лимита (None) - это нормально
     for stage in SS:
         max_len = sales_flow.get_stage_max_length(stage)
-        assert max_len is not None or stage not in [
+        # Этапы с лимитом должны иметь значение, этапы без лимита могут быть None
+        if stage in [SS.NEEDS_DISCOVERY, SS.PRESENTATION]:
+            # Эти этапы теперь без лимита
+            assert max_len is None
+        elif stage in [
             SS.GREETING,
-            SS.NEEDS_DISCOVERY,
-            SS.PRESENTATION,
             SS.OBJECTIONS,
             SS.CONSULTATION_OFFER,
             SS.SCHEDULING,
-        ]
+        ]:
+            # Эти этапы должны иметь лимит
+            assert max_len is not None
 
 
 def test_sales_flow_get_slots_empty(sales_flow):

@@ -386,8 +386,8 @@ class SalesFlow:
         """
         max_lengths = {
             SalesStage.GREETING: 150,  # Очень коротко для приветствия
-            SalesStage.NEEDS_DISCOVERY: 3500,  # Увеличено для развернутых ответов и объяснений возможностей
-            SalesStage.PRESENTATION: 4000,  # Максимум для Telegram (4096), но оставляем запас
+            SalesStage.NEEDS_DISCOVERY: None,  # Без лимита - для развернутых ответов на длинные транскрипты
+            SalesStage.PRESENTATION: None,  # Без лимита - для полных презентаций (Telegram сам ограничит до 4096)
             SalesStage.OBJECTIONS: 2500,  # Увеличено для детальных ответов на возражения
             SalesStage.CONSULTATION_OFFER: 600,  # Умеренно увеличено для предложения
             SalesStage.SCHEDULING: 500,  # Умеренно для согласования
