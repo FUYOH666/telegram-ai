@@ -875,12 +875,61 @@ class TelegramUserClient:
                         self.memory.save_user_context(sender.id, user_context_data)
                         current_intent = detected_intent.value
 
+                # Проверяем и устанавливаем флаг представления (introduced)
+                # Бот должен представляться только один раз в начале диалога
+                # Это работает независимо от sales_flow
+                is_introduced = False
+                if user_context_data:
+                    try:
+                        context_dict = json.loads(user_context_data)
+                        is_introduced = context_dict.get("introduced", False)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
                 # Работа со скриптом продаж
                 max_response_length = None
                 current_stage = None
 
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
+
+                    # Устанавливаем флаг introduced если это первое сообщение или этап GREETING
+                    if not is_introduced and (is_first_message or current_stage == SalesStage.GREETING):
+                        if user_context_data:
+                            try:
+                                context_dict = json.loads(user_context_data)
+                                context_dict["introduced"] = True
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                            except (json.JSONDecodeError, ValueError):
+                                # Создаем новый контекст с флагом
+                                context_dict = {"introduced": True}
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                        else:
+                            # Создаем новый контекст с флагом
+                            user_context_data = json.dumps({"introduced": True})
+                            self.memory.save_user_context(sender.id, user_context_data)
+                        is_introduced = True
+                else:
+                    # Если sales_flow отключен, устанавливаем флаг при первом сообщении
+                    if not is_introduced and is_first_message:
+                        if user_context_data:
+                            try:
+                                context_dict = json.loads(user_context_data)
+                                context_dict["introduced"] = True
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                            except (json.JSONDecodeError, ValueError):
+                                # Создаем новый контекст с флагом
+                                context_dict = {"introduced": True}
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                        else:
+                            # Создаем новый контекст с флагом
+                            user_context_data = json.dumps({"introduced": True})
+                            self.memory.save_user_context(sender.id, user_context_data)
+                        is_introduced = True
 
                     # Специальная логика: если пользователь пишет приветствие - сбрасываем на GREETING
                     # НО только если это явное приветствие в начале сообщения или короткое сообщение
@@ -905,7 +954,8 @@ class TelegramUserClient:
                     # Проверяем только если сообщение короткое (до 50 символов) или начинается с приветствия
                     is_short_message = len(message_text) <= 50
                     starts_with_greeting = any(
-                        message_lower.startswith(keyword) or message_lower.startswith(keyword + " ")
+                        message_lower.startswith(keyword)
+                        or message_lower.startswith(keyword + " ")
                         for keyword in greeting_keywords
                     )
                     # Также проверяем если сообщение состоит только из приветствия
@@ -913,8 +963,18 @@ class TelegramUserClient:
                         keyword == message_lower or message_lower == keyword + "!"
                         for keyword in greeting_keywords
                     )
-                    
-                    if (is_short_message and any(keyword in message_lower for keyword in greeting_keywords)) or starts_with_greeting or is_only_greeting:
+
+                    if (
+                        (
+                            is_short_message
+                            and any(
+                                keyword in message_lower
+                                for keyword in greeting_keywords
+                            )
+                        )
+                        or starts_with_greeting
+                        or is_only_greeting
+                    ):
                         if current_stage != SalesStage.GREETING:
                             logger.info(
                                 f"Greeting detected, resetting stage to GREETING (was {current_stage.value})"
@@ -966,6 +1026,20 @@ class TelegramUserClient:
                         )
                         self.memory.save_user_context(sender.id, user_context_data)
                         current_stage = new_stage
+                        # Сбрасываем счетчик сообщений при переходе на другой этап
+                        if user_context_data:
+                            try:
+                                context_dict = json.loads(user_context_data)
+                                if current_stage != SalesStage.PRESENTATION:
+                                    context_dict.pop(
+                                        "presentation_messages_count", None
+                                    )
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
+                            except (json.JSONDecodeError, ValueError):
+                                pass
                     else:
                         # Обновляем контекст если его нет
                         if not user_context_data:
@@ -973,6 +1047,47 @@ class TelegramUserClient:
                                 None, current_stage
                             )
                             self.memory.save_user_context(sender.id, user_context_data)
+
+                    # Счетчик сообщений на этапе PRESENTATION
+                    presentation_messages_count = 0
+                    if current_stage == SalesStage.PRESENTATION and new_stage is None:
+                        # Получаем текущий счетчик
+                        if user_context_data:
+                            try:
+                                context_dict = json.loads(user_context_data)
+                                presentation_messages_count = context_dict.get(
+                                    "presentation_messages_count", 0
+                                )
+                            except (json.JSONDecodeError, ValueError):
+                                presentation_messages_count = 0
+
+                        # Увеличиваем счетчик для текущего сообщения
+                        presentation_messages_count += 1
+
+                        # Сохраняем обновленный счетчик
+                        if user_context_data:
+                            try:
+                                context_dict = json.loads(user_context_data)
+                                context_dict["presentation_messages_count"] = (
+                                    presentation_messages_count
+                                )
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
+                            except (json.JSONDecodeError, ValueError):
+                                # Создаем новый контекст с счетчиком
+                                try:
+                                    context_dict = json.loads(user_context_data)
+                                except (json.JSONDecodeError, ValueError):
+                                    context_dict = {}
+                                context_dict["presentation_messages_count"] = (
+                                    presentation_messages_count
+                                )
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
 
                     # Автоматическое извлечение слотов из сообщения (только для Sales/Real Estate)
                     if (
@@ -993,158 +1108,174 @@ class TelegramUserClient:
                             )
                             # Продолжаем работу даже если автоизвлечение не удалось
 
-                    # Проверяем и запрашиваем недостающие слоты (только для Sales/Real Estate)
-                    slot_prompt_addition = ""
-                    if current_intent in ("SALES_AI", "REAL_ESTATE"):
-                        next_slot = self.sales_flow.get_next_slot_to_ask(
-                            user_context_data, current_intent
-                        )
-                        if next_slot:
-                            slot_prompt = self.sales_flow.get_slot_prompt(
-                                next_slot, current_intent
-                            )
-                            if slot_prompt:
-                                slot_prompt_addition = (
-                                    f"\n\nВАЖНО: Сейчас нужно выяснить: {slot_prompt} "
-                                    f"Используй этот вопрос естественно в диалоге, но не навязывай."
-                                )
+                    # Автоматический переход на CONSULTATION_OFFER после PRESENTATION
+                    # Проверяем ПОСЛЕ извлечения слотов, чтобы использовать актуальные данные
+                    if (
+                        new_stage is None
+                        and current_stage == SalesStage.PRESENTATION
+                        and self.sales_flow
+                        and self.meeting_summary
+                    ):
+                        # Получаем слоты для проверки готовности к встрече (после извлечения)
+                        slots = self.sales_flow.get_slots(user_context_data)
+                        is_ready = self.meeting_summary.is_ready_for_meeting(slots)
 
-                    # Получаем максимальную длину ответа для текущего этапа
+                        # Проверяем, нужно ли предложить консультацию
+                        should_offer = self.sales_flow.should_offer_consultation(
+                            user_context_data,
+                            current_intent,
+                            presentation_messages_count,
+                            is_ready,
+                        )
+
+                        if should_offer:
+                            logger.info(
+                                f"Auto-transitioning to CONSULTATION_OFFER: "
+                                f"is_ready={is_ready}, messages_count={presentation_messages_count}"
+                            )
+                            new_stage = SalesStage.CONSULTATION_OFFER
+                            user_context_data = self.sales_flow.update_stage(
+                                user_context_data, new_stage
+                            )
+                            # Сбрасываем счетчик при переходе
+                            if user_context_data:
+                                try:
+                                    context_dict = json.loads(user_context_data)
+                                    context_dict.pop(
+                                        "presentation_messages_count", None
+                                    )
+                                    user_context_data = json.dumps(context_dict)
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                            self.memory.save_user_context(sender.id, user_context_data)
+                            current_stage = new_stage
+
+                # Проверяем и запрашиваем недостающие слоты (только для Sales/Real Estate)
+                slot_prompt_addition = ""
+                if (
+                    self.sales_flow
+                    and self.sales_flow.enabled
+                    and current_intent in ("SALES_AI", "REAL_ESTATE")
+                ):
+                    next_slot = self.sales_flow.get_next_slot_to_ask(
+                        user_context_data, current_intent
+                    )
+                    if next_slot:
+                        slot_prompt = self.sales_flow.get_slot_prompt(
+                            next_slot, current_intent
+                        )
+                        if slot_prompt:
+                            slot_prompt_addition = (
+                                f"\n\nВАЖНО: Сейчас нужно выяснить: {slot_prompt} "
+                                f"Используй этот вопрос естественно в диалоге, но не навязывай."
+                            )
+
+                # Получаем максимальную длину ответа для текущего этапа
+                if self.sales_flow and self.sales_flow.enabled and current_stage is not None:
                     max_response_length = self.sales_flow.get_stage_max_length(
                         current_stage
                     )
+                else:
+                    max_response_length = None
 
-                    # Модифицируем системный промпт для текущего этапа
+                # Модифицируем системный промпт для текущего этапа
+                if self.sales_flow and self.sales_flow.enabled and current_stage is not None:
                     stage_modifier = self.sales_flow.get_stage_prompt_modifier(
                         current_stage
                     )
-
-                    # Формируем инструкции (будет добавлено ПОСЛЕ основного промпта)
-                    length_info = ""
-                    if max_response_length:
-                        length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
-                    else:
-                        # Если лимита нет, напоминаем что можно писать развернуто, система сама разобьет на части
-                        length_info = "\n\nВАЖНО: Отвечай ПОЛНОСТЬЮ и развернуто, не обрезай ответ. Если ответ превысит 4096 символов, система автоматически разобьет его на несколько сообщений. НЕ добавляй многоточие и НЕ обрезай ответ самостоятельно."
-
-                    # ВАЖНО: Добавляем инструкцию о языке ВСЕГДА на основе последнего сообщения
-                    language_instruction = ""
-                    if response_lang == "zh":
-                        # Специальная инструкция для китайского - упрощенный китайский
-                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
-                    elif response_lang and response_lang in SUPPORTED_LANGUAGES:
-                        lang_name = get_language_name(response_lang)
-                        language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на другие языки, если пользователь пишет на конкретном языке."
-                    elif not response_lang or response_lang == "ru":
-                        # По умолчанию русский язык
-                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
-
-                    # Формируем модификаторы для добавления ПОСЛЕ основного промпта
-                    if stage_modifier:
-                        full_modifier = (
-                            language_instruction
-                            + "\n\n"
-                            + stage_modifier
-                            + length_info
-                            + slot_prompt_addition
-                        )
-                    else:
-                        full_modifier = (
-                            language_instruction + length_info + slot_prompt_addition
-                        )
-
-                    # Обновляем или добавляем системное сообщение
-                    # ВАЖНО: Структура должна быть: Дата -> Основной промпт -> Модификаторы
-                    # Дата добавляется в ai_client.py в начало системного сообщения
-                    # Основной промпт должен быть ПЕРВЫМ в системном сообщении, модификаторы ПОСЛЕ него
-                    modified_context = context.copy()
-                    system_found = False
-                    main_prompt = self.ai_client.system_prompt or ""
-
-                    for msg in modified_context:
-                        if msg.get("role") == "system":
-                            content = msg.get("content", "")
-                            # Проверяем, есть ли уже основной промпт
-                            has_main_prompt = (
-                                "Александр" in content
-                                and "Scanovich.ai" in content
-                                and "Принципы общения" in content
-                            )
-
-                            if has_main_prompt:
-                                # Основной промпт уже есть - добавляем модификаторы ПОСЛЕ него
-                                msg["content"] = content + "\n\n" + full_modifier
-                            else:
-                                # Основного промпта нет - добавляем его сначала, затем модификаторы
-                                if main_prompt:
-                                    msg["content"] = (
-                                        main_prompt + "\n\n" + full_modifier
-                                    )
-                                else:
-                                    msg["content"] = content + "\n\n" + full_modifier
-                            system_found = True
-                            break
-
-                    if not system_found:
-                        # Системного сообщения нет - создаем с основным промптом и модификаторами
-                        # Дата будет добавлена в ai_client.py в начало
-                        if main_prompt:
-                            system_content = main_prompt + "\n\n" + full_modifier
-                        else:
-                            system_content = full_modifier
-                        modified_context.insert(
-                            0, {"role": "system", "content": system_content}
-                        )
-
-                    context = modified_context
                 else:
-                    # Sales flow отключен - добавляем только инструкцию о языке
-                    language_instruction = ""
-                    if response_lang == "zh":
-                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
-                    elif response_lang and response_lang in SUPPORTED_LANGUAGES:
-                        lang_name = get_language_name(response_lang)
-                        language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на другие языки, если пользователь пишет на конкретном языке."
-                    elif not response_lang or response_lang == "ru":
-                        language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
+                    stage_modifier = None
 
-                    # Добавляем инструкцию о языке к системному сообщению
-                    modified_context = context.copy()
-                    system_found = False
-                    main_prompt = self.ai_client.system_prompt or ""
+                # Добавляем инструкцию о представлении на основе флага introduced
+                # Эта инструкция добавляется всегда, независимо от sales_flow
+                introduction_instruction = ""
+                if is_introduced:
+                    introduction_instruction = "\n\n⚠️ ВАЖНО: Пользователь уже знает, что ты Александр из Scanovich.ai. НЕ повторяй эту информацию в ответе, просто общайся естественно. Не упоминай свое имя и компанию, если это не требуется по контексту."
+                else:
+                    introduction_instruction = "\n\n⚠️ ВАЖНО: Это первое знакомство с пользователем. Представься как Александр из Scanovich.ai при приветствии."
 
-                    for msg in modified_context:
-                        if msg.get("role") == "system":
-                            content = msg.get("content", "")
-                            has_main_prompt = (
-                                "Александр" in content
-                                and "Scanovich.ai" in content
-                                and "Принципы общения" in content
-                            )
+                # Формируем инструкции (будет добавлено ПОСЛЕ основного промпта)
+                length_info = ""
+                if max_response_length:
+                    length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
+                else:
+                    # Если лимита нет, напоминаем что можно писать развернуто, система сама разобьет на части
+                    length_info = "\n\nВАЖНО: Отвечай ПОЛНОСТЬЮ и развернуто, не обрезай ответ. Если ответ превысит 4096 символов, система автоматически разобьет его на несколько сообщений. НЕ добавляй многоточие и НЕ обрезай ответ самостоятельно."
 
-                            if has_main_prompt:
-                                # Основной промпт есть - добавляем инструкцию о языке ПОСЛЕ него
-                                msg["content"] = content + language_instruction
-                            else:
-                                # Основного промпта нет - добавляем его сначала, затем инструкцию о языке
-                                if main_prompt:
-                                    msg["content"] = main_prompt + language_instruction
-                                else:
-                                    msg["content"] = content + language_instruction
-                            system_found = True
-                            break
+                # ВАЖНО: Добавляем инструкцию о языке ВСЕГДА на основе последнего сообщения
+                language_instruction = ""
+                if response_lang == "zh":
+                    # Специальная инструкция для китайского - упрощенный китайский
+                    language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на упрощенном китайском (Simplified Chinese). ОБЯЗАТЕЛЬНО отвечай ТОЛЬКО на упрощенном китайском языке. НЕ используй английский или русский язык. НЕ используй традиционный китайский (Traditional Chinese). Используй только упрощенный китайский (简体中文)."
+                elif response_lang and response_lang in SUPPORTED_LANGUAGES:
+                    lang_name = get_language_name(response_lang)
+                    language_instruction = f"\n\n⚠️ ВАЖНО: Пользователь пишет на {lang_name} языке. ОБЯЗАТЕЛЬНО отвечай на {lang_name} языке. Не переключайся на другие языки, если пользователь пишет на конкретном языке."
+                elif not response_lang or response_lang == "ru":
+                    # По умолчанию русский язык
+                    language_instruction = "\n\n⚠️ ВАЖНО: Пользователь пишет на русском языке. Отвечай на русском языке."
 
-                    if not system_found:
-                        # Системного сообщения нет - создаем с основным промптом и инструкцией о языке
-                        if main_prompt:
-                            system_content = main_prompt + language_instruction
-                        else:
-                            system_content = language_instruction
-                        modified_context.insert(
-                            0, {"role": "system", "content": system_content}
+                # Формируем модификаторы для добавления ПОСЛЕ основного промпта
+                if stage_modifier:
+                    full_modifier = (
+                        introduction_instruction
+                        + language_instruction
+                        + "\n\n"
+                        + stage_modifier
+                        + length_info
+                        + slot_prompt_addition
+                    )
+                else:
+                    full_modifier = (
+                        introduction_instruction
+                        + language_instruction
+                        + length_info
+                        + slot_prompt_addition
+                    )
+
+                # Обновляем или добавляем системное сообщение
+                # ВАЖНО: Структура должна быть: Дата -> Основной промпт -> Модификаторы
+                # Дата добавляется в ai_client.py в начало системного сообщения
+                # Основной промпт должен быть ПЕРВЫМ в системном сообщении, модификаторы ПОСЛЕ него
+                modified_context = context.copy()
+                system_found = False
+                main_prompt = self.ai_client.system_prompt or ""
+
+                for msg in modified_context:
+                    if msg.get("role") == "system":
+                        content = msg.get("content", "")
+                        # Проверяем, есть ли уже основной промпт
+                        has_main_prompt = (
+                            "Александр" in content
+                            and "Scanovich.ai" in content
+                            and "Принципы общения" in content
                         )
 
-                    context = modified_context
+                        if has_main_prompt:
+                            # Основной промпт уже есть - добавляем модификаторы ПОСЛЕ него
+                            msg["content"] = content + "\n\n" + full_modifier
+                        else:
+                            # Основного промпта нет - добавляем его сначала, затем модификаторы
+                            if main_prompt:
+                                msg["content"] = (
+                                    main_prompt + "\n\n" + full_modifier
+                                )
+                            else:
+                                msg["content"] = content + "\n\n" + full_modifier
+                        system_found = True
+                        break
+
+                if not system_found:
+                    # Системного сообщения нет - создаем с основным промптом и модификаторами
+                    # Дата будет добавлена в ai_client.py в начало
+                    if main_prompt:
+                        system_content = main_prompt + "\n\n" + full_modifier
+                    else:
+                        system_content = full_modifier
+                    modified_context.insert(
+                        0, {"role": "system", "content": system_content}
+                    )
+
+                context = modified_context
 
                 # Проверяем, нужен ли веб-поиск (по ключевым словам)
                 web_search_results = None

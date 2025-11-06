@@ -259,10 +259,20 @@ def test_sales_flow_get_slot_prompt_not_found(sales_flow):
 
 def test_sales_flow_get_next_slot_to_ask(sales_flow):
     """Тест получения следующего слота для запроса."""
-    # Пустой контекст - должен вернуть приоритетный слот
+    # Пустой контекст - должен вернуть приоритетный слот (приоритет 1: базовые слоты)
     next_slot = sales_flow.get_next_slot_to_ask(None, "SALES_AI")
     assert next_slot is not None
-    assert next_slot in ["goal", "purpose", "budget", "budget_band", "contact"]
+    # Для SALES_AI приоритет 1: базовые слоты (client_name, company_name, contact, company_size)
+    assert next_slot in [
+        "client_name",
+        "company_name",
+        "contact",
+        "company_size",
+        "goal",
+        "purpose",
+        "budget",
+        "budget_band",
+    ]  # Может быть любой из приоритетных
 
     # Контекст с заполненными приоритетными слотами
     context_data = json.dumps(
@@ -396,3 +406,42 @@ def test_sales_flow_domain_compatibility(sales_flow):
     )
     missing = sales_flow.get_missing_slots(context_data, "SALES_AI")
     assert "company_domain" not in missing  # Должен считаться заполненным
+
+
+def test_sales_flow_should_offer_consultation(sales_flow):
+    """Тест проверки автоматического предложения консультации."""
+    # Не на этапе PRESENTATION - не предлагаем
+    context_data = json.dumps({"sales_stage": "greeting"})
+    assert (
+        sales_flow.should_offer_consultation(
+            context_data, "SALES_AI", presentation_messages_count=5, is_ready_for_meeting=True
+        )
+        is False
+    )
+
+    # На этапе PRESENTATION, но недостаточно информации и мало сообщений
+    context_data = json.dumps({"sales_stage": "presentation"})
+    assert (
+        sales_flow.should_offer_consultation(
+            context_data, "SALES_AI", presentation_messages_count=1, is_ready_for_meeting=False
+        )
+        is False
+    )
+
+    # На этапе PRESENTATION, достаточно информации - предлагаем
+    context_data = json.dumps({"sales_stage": "presentation"})
+    assert (
+        sales_flow.should_offer_consultation(
+            context_data, "SALES_AI", presentation_messages_count=1, is_ready_for_meeting=True
+        )
+        is True
+    )
+
+    # На этапе PRESENTATION, 2+ сообщений - предлагаем даже без достаточной информации
+    context_data = json.dumps({"sales_stage": "presentation"})
+    assert (
+        sales_flow.should_offer_consultation(
+            context_data, "SALES_AI", presentation_messages_count=2, is_ready_for_meeting=False
+        )
+        is True
+    )
