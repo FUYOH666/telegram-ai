@@ -220,6 +220,9 @@ class SalesFlow:
     ) -> Optional[SalesStage]:
         """
         Определить переход на следующий этап на основе сообщения.
+        
+        ВАЖНО: Переходы только ВПЕРЕД, никогда назад. Это гарантирует прогресс в диалоге
+        и предотвращает повторные вопросы и "откаты" на предыдущие этапы.
 
         Args:
             message: Текст сообщения пользователя
@@ -240,30 +243,50 @@ class SalesFlow:
         ):
             return SalesStage.GREETING
 
-        # Логика переходов
+        # Логика переходов - ТОЛЬКО ВПЕРЕД, НИКОГДА НАЗАД
+        # Это гарантирует, что бот не будет "откатываться" на предыдущие этапы
+        # и не будет задавать повторные вопросы
+        
         if current_stage == SalesStage.GREETING:
+            # Из GREETING можно перейти только в NEEDS_DISCOVERY или PRESENTATION
             if any(keyword in message_lower for keyword in self.NEEDS_KEYWORDS):
                 return SalesStage.NEEDS_DISCOVERY
             if any(keyword in message_lower for keyword in self.PRESENTATION_KEYWORDS):
                 return SalesStage.PRESENTATION
 
         elif current_stage == SalesStage.NEEDS_DISCOVERY:
+            # Из NEEDS_DISCOVERY можно перейти только в PRESENTATION, OBJECTIONS или CONSULTATION_OFFER
+            # НЕ возвращаемся в GREETING, даже если есть слова приветствия
             if any(keyword in message_lower for keyword in self.PRESENTATION_KEYWORDS):
                 return SalesStage.PRESENTATION
             if any(keyword in message_lower for keyword in self.OBJECTIONS_KEYWORDS):
                 return SalesStage.OBJECTIONS
+            # Если пользователь явно просит консультацию - переходим сразу к предложению
+            if any(keyword in message_lower for keyword in self.CONSULTATION_KEYWORDS):
+                return SalesStage.CONSULTATION_OFFER
 
         elif current_stage == SalesStage.PRESENTATION:
+            # Из PRESENTATION можно перейти только в OBJECTIONS, CONSULTATION_OFFER или SCHEDULING
+            # НЕ возвращаемся в NEEDS_DISCOVERY, даже если есть слова "нужно", "хочу", "проблема"
+            # Эти слова могут быть частью вопроса о решении, а не запросом на сбор информации
             if any(keyword in message_lower for keyword in self.OBJECTIONS_KEYWORDS):
                 return SalesStage.OBJECTIONS
             if any(keyword in message_lower for keyword in self.CONSULTATION_KEYWORDS):
                 return SalesStage.CONSULTATION_OFFER
+            # Если пользователь спрашивает про время - переходим к согласованию
+            if any(keyword in message_lower for keyword in self.SCHEDULING_KEYWORDS):
+                return SalesStage.SCHEDULING
 
         elif current_stage == SalesStage.OBJECTIONS:
+            # Из OBJECTIONS можно перейти только в CONSULTATION_OFFER или SCHEDULING
             if any(keyword in message_lower for keyword in self.CONSULTATION_KEYWORDS):
                 return SalesStage.CONSULTATION_OFFER
+            # Если пользователь спрашивает про время - переходим к согласованию
+            if any(keyword in message_lower for keyword in self.SCHEDULING_KEYWORDS):
+                return SalesStage.SCHEDULING
 
         elif current_stage == SalesStage.CONSULTATION_OFFER:
+            # Из CONSULTATION_OFFER можно перейти только в SCHEDULING
             if any(keyword in message_lower for keyword in self.SCHEDULING_KEYWORDS):
                 return SalesStage.SCHEDULING
 

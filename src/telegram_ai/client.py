@@ -882,14 +882,17 @@ class TelegramUserClient:
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
 
-                    # Специальная логика: если пользователь пишет приветствие - всегда сбрасываем на GREETING
-                    # (независимо от истории, это сигнал начала нового диалога)
+                    # Специальная логика: если пользователь пишет приветствие - сбрасываем на GREETING
+                    # НО только если это явное приветствие в начале сообщения или короткое сообщение
+                    # Это предотвращает ложные срабатывания на слова типа "расскажи" (содержит "привет")
                     message_lower = message_text.lower().strip()
                     greeting_keywords = [
                         "привет",
                         "здравствуй",
                         "здравствуйте",
-                        "добрый",
+                        "добрый день",
+                        "добрый вечер",
+                        "доброе утро",
                         "начать",
                         # Английские приветствия
                         "hi",
@@ -899,7 +902,19 @@ class TelegramUserClient:
                         "good afternoon",
                         "good evening",
                     ]
-                    if any(keyword in message_lower for keyword in greeting_keywords):
+                    # Проверяем только если сообщение короткое (до 50 символов) или начинается с приветствия
+                    is_short_message = len(message_text) <= 50
+                    starts_with_greeting = any(
+                        message_lower.startswith(keyword) or message_lower.startswith(keyword + " ")
+                        for keyword in greeting_keywords
+                    )
+                    # Также проверяем если сообщение состоит только из приветствия
+                    is_only_greeting = any(
+                        keyword == message_lower or message_lower == keyword + "!"
+                        for keyword in greeting_keywords
+                    )
+                    
+                    if (is_short_message and any(keyword in message_lower for keyword in greeting_keywords)) or starts_with_greeting or is_only_greeting:
                         if current_stage != SalesStage.GREETING:
                             logger.info(
                                 f"Greeting detected, resetting stage to GREETING (was {current_stage.value})"
