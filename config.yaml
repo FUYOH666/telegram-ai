@@ -217,7 +217,7 @@ rate_limiting:
 
 asr_server:
   base_url: http://100.93.82.48:8001
-  timeout: 60
+  timeout: 180  # Увеличено с 60 до 180 секунд для длинных голосовых сообщений (до 60 секунд аудио + обработка)
   enabled: true
 
 sales_flow:

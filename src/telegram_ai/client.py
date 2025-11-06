@@ -380,6 +380,16 @@ class TelegramUserClient:
                             temp_audio_dir = Path("./temp_audio")
                             temp_audio_dir.mkdir(exist_ok=True)
                             
+                            # Получаем длительность аудио если доступна (для логирования)
+                            audio_duration = None
+                            if event.message.voice:
+                                audio_duration = getattr(event.message.voice, 'duration', None)
+                            elif event.message.audio:
+                                audio_duration = getattr(event.message.audio, 'duration', None)
+                            
+                            if audio_duration:
+                                logger.info(f"🎤 Audio duration: {audio_duration} seconds")
+                            
                             # Скачиваем аудио файл
                             audio_path = await event.message.download_media(file=str(temp_audio_dir))
                             audio_path = Path(audio_path)

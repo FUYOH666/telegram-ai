@@ -1,6 +1,7 @@
 """Обработка голосовых сообщений через ASR сервис."""
 
 import logging
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +31,15 @@ class VoiceHandler:
         self.timeout = timeout
         self.enabled = enabled
 
-        self.client = httpx.AsyncClient(timeout=timeout)
+        # Настраиваем таймауты: отдельно для подключения и чтения
+        # Для длинных аудио файлов нужен больший таймаут на чтение
+        timeout_config = httpx.Timeout(
+            connect=15.0,  # Таймаут подключения: 15 секунд
+            read=float(timeout),  # Таймаут чтения: настраиваемый (для обработки длинных аудио)
+            write=30.0,  # Таймаут записи: 30 секунд (загрузка файла может занять время)
+            pool=10.0,  # Таймаут пула соединений: 10 секунд
+        )
+        self.client = httpx.AsyncClient(timeout=timeout_config)
 
         logger.info(
             f"VoiceHandler initialized: base_url={self.base_url}, "
@@ -63,7 +72,11 @@ class VoiceHandler:
         url = f"{self.base_url}/transcribe"
 
         try:
-            logger.info(f"Transcribing audio file: {audio_file_path}")
+            # Получаем размер файла для логирования
+            file_size = audio_file_path.stat().st_size
+            logger.info(
+                f"Transcribing audio file: {audio_file_path} (size: {file_size} bytes)"
+            )
 
             # Определяем MIME-тип по расширению файла
             mime_types = {
@@ -78,29 +91,48 @@ class VoiceHandler:
             file_ext = audio_file_path.suffix.lower()
             mime_type = mime_types.get(file_ext, "audio/ogg")  # По умолчанию audio/ogg
 
-            # Открываем файл и отправляем multipart/form-data запрос
-            with open(audio_file_path, "rb") as audio_file:
-                # Используем правильное имя файла и MIME-тип
-                files = {"file": (audio_file_path.name, audio_file, mime_type)}
-                data = {}
-                if language:
-                    data["language"] = language
+            # Читаем файл в память перед отправкой (чтобы избежать проблем с закрытием файла)
+            audio_data = audio_file_path.read_bytes()
+            logger.debug(f"Read {len(audio_data)} bytes from audio file")
 
+            # Используем BytesIO для передачи файла httpx
+            # Важно: создаем BytesIO с данными и устанавливаем позицию в начало
+            audio_file_obj = BytesIO(audio_data)
+            audio_file_obj.seek(0)  # Убеждаемся что позиция в начале
+
+            # Формируем multipart/form-data запрос
+            files = {"file": (audio_file_path.name, audio_file_obj, mime_type)}
+            data = {}
+            if language:
+                data["language"] = language
+
+            logger.info(
+                f"Sending POST request to {url} with file size {len(audio_data)} bytes, "
+                f"language={language}, mime_type={mime_type}"
+            )
+
+            try:
                 response = await self.client.post(url, files=files, data=data)
-                response.raise_for_status()
+            except Exception as e:
+                logger.error(f"Error sending request to ASR server: {e}", exc_info=True)
+                raise
+            logger.debug(f"Received response: status={response.status_code}")
 
-                result = response.json()
+            response.raise_for_status()
 
-                # Извлекаем текст из ответа
-                text = result.get("text", "")
-                if not text:
-                    logger.warning(f"No text in ASR response: {result}")
-                    raise ValueError("ASR service returned empty transcription")
+            result = response.json()
+            logger.debug(f"Response JSON: {result}")
 
-                logger.info(f"Transcription successful: {len(text)} characters")
-                logger.debug(f"Transcribed text: {text[:100]}...")
+            # Извлекаем текст из ответа
+            text = result.get("text", "")
+            if not text:
+                logger.warning(f"No text in ASR response: {result}")
+                raise ValueError("ASR service returned empty transcription")
 
-                return text
+            logger.info(f"Transcription successful: {len(text)} characters")
+            logger.debug(f"Transcribed text: {text[:100]}...")
+
+            return text
 
         except httpx.HTTPStatusError as e:
             logger.error(

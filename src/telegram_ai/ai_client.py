@@ -421,9 +421,12 @@ class AIClient:
                     result += (" " + word) if result else word
                 else:
                     break
-            
-            # Добавляем многоточие если текст был обрезан
-            if result != text:
+        
+        # Добавляем многоточие только если текст был обрезан в середине предложения
+        # Если обрезка произошла по предложениям - многоточие не добавляем (предложение завершено)
+        if result != text and len(result) < len(text):
+            # Проверяем, закончилось ли последнее предложение пунктуацией
+            if result and result[-1] not in ".!?;:":
                 result = result.rstrip() + "..."
         
         return result
