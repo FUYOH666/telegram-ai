@@ -513,6 +513,12 @@ class TelegramUserClient:
                         sender.id, message_text, messages_per_minute=messages_per_minute
                     )
                     if not allowed:
+                        # Если reason = None, значит сообщение слишком короткое (1 символ) - игнорируем без ответа
+                        if reason is None:
+                            logger.debug(
+                                f"Ignoring very short message (1 char) from user {sender.id} without reply"
+                            )
+                            return
                         logger.warning(
                             f"Rate limit exceeded for user {sender.id} (chat_type={chat_type}): {reason}"
                         )

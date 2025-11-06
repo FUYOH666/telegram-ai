@@ -38,7 +38,7 @@ def rate_limiter(memory):
         min_interval_seconds=1,
         block_duration_minutes=5,
         max_repeated_messages=2,
-        min_message_length=1,
+        min_message_length=2,  # Как в реальной конфигурации
         max_message_length=1000,
     )
 
@@ -63,11 +63,18 @@ def test_rate_limiter_check_allowed(rate_limiter):
 def test_rate_limiter_min_length(rate_limiter):
     """Тест проверки минимальной длины сообщения."""
     user_id = 123
-    message = ""  # Пустое сообщение (меньше min_message_length=1)
-
+    
+    # Пустое сообщение (0 символов) - должно игнорироваться без ответа
+    message = ""
     allowed, reason = rate_limiter.check_rate_limit(user_id, message)
     assert allowed is False
-    assert "короткое" in reason.lower()
+    assert reason is None  # Для очень коротких сообщений (<= 1 символа) возвращается None
+    
+    # Сообщение из 1 символа - должно игнорироваться без ответа
+    message = "K"
+    allowed, reason = rate_limiter.check_rate_limit(user_id, message)
+    assert allowed is False
+    assert reason is None  # Для очень коротких сообщений (<= 1 символа) возвращается None
 
 
 def test_rate_limiter_max_length(rate_limiter):

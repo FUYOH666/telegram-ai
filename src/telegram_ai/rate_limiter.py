@@ -143,6 +143,11 @@ class RateLimiter:
             logger.debug(
                 f"Message too short ({message_len} < {self.min_message_length}) for user {user_id}"
             )
+            # Для очень коротких сообщений (1 символ) - игнорируем без ответа (более естественно)
+            # Для пустых сообщений - тоже игнорируем
+            if message_len <= 1:
+                return False, None  # None означает "игнорировать без ответа"
+            # Для сообщений длиной 2+ символов, но меньше минимума - возвращаем причину
             return False, f"Сообщение слишком короткое (минимум {self.min_message_length} символов)."
 
         if message_len > self.max_message_length:
