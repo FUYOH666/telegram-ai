@@ -17,6 +17,7 @@ class SalesStage(str, Enum):
     OBJECTIONS = "objections"
     CONSULTATION_OFFER = "consultation_offer"
     SCHEDULING = "scheduling"
+    SUMMARY = "summary"
 
 
 class SalesFlow:
@@ -24,13 +25,27 @@ class SalesFlow:
 
     # Обязательные слоты для Sales (AI-проекты)
     SALES_REQUIRED_SLOTS = {
+        # Базовые слоты (приоритет 1)
+        "client_name",  # Имя клиента
+        "company_name",  # Название компании
+        "contact",  # Контактная информация
+        "company_size",  # Размер компании (количество сотрудников или категория)
+        # Слоты о бизнесе (приоритет 2)
+        "company_domain",  # Сфера деятельности компании (расширяем domain)
+        "main_problems",  # Основные проблемы бизнеса
+        "time_consuming_tasks",  # Задачи, отнимающие много времени у сотрудников
+        "process_volume",  # Объем операций/обработки
+        "employees_involved",  # Количество сотрудников, вовлеченных в процесс
+        "current_time_cost",  # Текущие временные затраты
+        "error_rate",  # Текущий уровень ошибок/переделок
+        "business_revenue",  # Оборот компании
+        "current_cost",  # Текущие затраты на процесс
+        # Слоты о проекте (приоритет 3)
         "goal",  # Цель проекта
-        "domain",  # Домен бизнеса
         "deadline",  # Сроки
         "budget_band",  # Бюджет/диапазон
         "data_access",  # Доступ к данным
         "success_metric",  # Критерий успеха
-        "contact",  # Контакт
     }
 
     # Обязательные слоты для Real Estate
@@ -49,13 +64,29 @@ class SalesFlow:
 
     # Промпты для запроса слотов Sales (открытые вопросы, естественный тон)
     SALES_SLOT_PROMPTS = {
+        # Базовые (приоритет 1)
+        "client_name": "Как тебя зовут?",
+        "company_name": "Расскажи, какая у тебя компания? Как она называется?",
+        "contact": "Как с тобой удобнее связаться? Можешь оставить телефон или email?",
+        "company_size": "Сколько примерно сотрудников у вас в компании? Или это малый/средний/крупный бизнес?",
+        # О бизнесе (приоритет 2)
+        "company_domain": "В какой сфере работает твоя компания? Чем занимаетесь?",
+        "main_problems": "Какие основные проблемы или задачи у вас сейчас? Что больше всего беспокоит?",
+        "time_consuming_tasks": "Какие задачи отнимают больше всего времени у твоих сотрудников? Что можно автоматизировать?",
+        "process_volume": "А сколько примерно операций у вас в день? Например, сколько документов обрабатываете, звонков принимаете, или запросов обрабатываете?",
+        "employees_involved": "Сколько сотрудников обычно занимаются этой задачей?",
+        "current_time_cost": "Сколько примерно времени в неделю или месяц уходит на эту задачу?",
+        "error_rate": "А как часто бывают ошибки? Приходится ли переделывать работу?",
+        "business_revenue": "Можешь поделиться примерным оборотом компании? Это поможет понять масштаб задачи.",
+        "current_cost": "Сколько примерно сейчас уходит на этот процесс? Зарплаты сотрудников или какие-то инструменты?",
+        # О проекте (приоритет 3)
         "goal": "Расскажи, какую главную задачу хочешь решить с помощью AI?",
-        "domain": "В какой сфере работает твоя компания? Медицина, финансы, ритейл или что-то другое?",
         "deadline": "Есть ли у тебя ориентир по срокам? Когда хотелось бы увидеть результат?",
         "budget_band": "Рассматривал ли ты, какой бюджет готов вложить? Хотя бы порядок — диапазоном или разовый?",
         "data_access": "А с данными как? Есть ли доступ к ним или нужны интеграции?",
         "success_metric": "Как поймёшь, что проект успешен? Что будет главным показателем?",
-        "contact": "Как с тобой удобнее связаться для деталей? Телефон, email, Telegram?",
+        # Для обратной совместимости (старое поле domain)
+        "domain": "В какой сфере работает твоя компания? Медицина, финансы, ритейл или что-то другое?",
     }
 
     # Промпты для запроса слотов Real Estate (открытые вопросы, естественный тон)
@@ -159,9 +190,7 @@ class SalesFlow:
         except (json.JSONDecodeError, ValueError):
             return SalesStage.GREETING
 
-    def update_stage(
-        self, context_data: Optional[str], new_stage: SalesStage
-    ) -> str:
+    def update_stage(self, context_data: Optional[str], new_stage: SalesStage) -> str:
         """
         Обновить этап в контексте.
 
@@ -206,7 +235,9 @@ class SalesFlow:
         message_lower = message.lower()
 
         # Если это первое сообщение и оно похоже на приветствие - принудительно ставим GREETING
-        if is_first_message and any(keyword in message_lower for keyword in self.GREETING_KEYWORDS):
+        if is_first_message and any(
+            keyword in message_lower for keyword in self.GREETING_KEYWORDS
+        ):
             return SalesStage.GREETING
 
         # Логика переходов
@@ -236,6 +267,9 @@ class SalesFlow:
             if any(keyword in message_lower for keyword in self.SCHEDULING_KEYWORDS):
                 return SalesStage.SCHEDULING
 
+        # После согласования времени (SCHEDULING) переход на SUMMARY обрабатывается отдельно
+        # через проверку should_transition_to_summary() в client.py
+
         return None
 
     def get_stage_prompt_modifier(self, stage: SalesStage) -> str:
@@ -263,16 +297,19 @@ class SalesFlow:
                 "- ЗАПРЕЩЕНО упоминать услуги, проекты или любые детали до того, как пользователь спросит"
             ),
             SalesStage.NEEDS_DISCOVERY: (
-                "Сейчас этап выявления потребностей. Используй консультативный подход.\n\n"
+                "Сейчас этап выявления потребностей. Используй консультативный подход для сбора информации о клиенте.\n\n"
                 "Правила:\n"
                 "- Задавай открытые вопросы вместо допроса ('Расскажи, какая у тебя ситуация?' вместо 'Укажи проблему')\n"
                 "- Задавай по одному вопросу за раз, не перегружай пользователя\n"
                 "- Проявляй эмпатию — покажи, что понимаешь проблему ('Понимаю, это действительно...')\n"
                 "- Отзеркаливай значимые детали из ответов пользователя\n"
-                "- Если знаешь имя пользователя — используй его периодически (не в каждом сообщении)\n\n"
+                "- Если знаешь имя пользователя — используй его периодически (не в каждом сообщении)\n"
+                "- Собирай информацию естественно в процессе диалога: сначала базовые данные (имя, компания), потом о бизнесе (проблемы, метрики), затем о проекте\n"
+                "- Если клиент не готов делиться некоторой информацией (например, финансовыми показателями) — не дави, но объясни, что это поможет лучше понять масштаб задачи\n\n"
                 "Примеры естественных реакций:\n"
                 "- 'Окей, понял. А расскажи, какая у вас сейчас ситуация с [проблема]?'\n"
-                "- 'Понимаю, это боль многих компаний. Что чаще всего вызывает [проблема]?'\n\n"
+                "- 'Понимаю, это боль многих компаний. Что чаще всего вызывает [проблема]?'\n"
+                "- 'Спасибо за информацию! А можешь поделиться примерным оборотом компании? Это поможет лучше понять масштаб задачи.'\n\n"
                 "Длина ответа: 2-4 предложения максимум."
             ),
             SalesStage.PRESENTATION: (
@@ -322,6 +359,17 @@ class SalesFlow:
                 "- 'Жду тебя в четверг в 15:00, скину Zoom'\n\n"
                 "Длина ответа: 2-3 предложения максимум."
             ),
+            SalesStage.SUMMARY: (
+                "Сейчас этап формирования сводки для встречи. Ты собрал всю необходимую информацию о клиенте.\n\n"
+                "Правила:\n"
+                "- Подтверди, что информация собрана и встреча будет подготовлена\n"
+                "- Предложи встречу с готовой сводкой\n"
+                "- Будь дружелюбным и профессиональным\n\n"
+                "Примеры естественных реакций:\n"
+                "- 'Отлично! Я собрал всю информацию о вашей компании и задачах. Предлагаю созвониться, чтобы обсудить варианты решения.'\n"
+                "- 'Спасибо за подробную информацию! Готовлю материалы для встречи. Когда удобно созвониться?'\n\n"
+                "Длина ответа: 2-3 предложения максимум."
+            ),
         }
 
         return modifiers.get(stage, "")
@@ -338,11 +386,12 @@ class SalesFlow:
         """
         max_lengths = {
             SalesStage.GREETING: 150,  # Очень коротко для приветствия
-            SalesStage.NEEDS_DISCOVERY: 300,  # Умеренно для вопросов
-            SalesStage.PRESENTATION: 500,  # Подробнее для презентации
-            SalesStage.OBJECTIONS: 400,  # Умеренно для возражений
-            SalesStage.CONSULTATION_OFFER: 250,  # Коротко для предложения
-            SalesStage.SCHEDULING: 300,  # Умеренно для согласования
+            SalesStage.NEEDS_DISCOVERY: 1000,  # Увеличено для более подробных вопросов и объяснений
+            SalesStage.PRESENTATION: 3000,  # Значительно увеличено для развернутых презентаций (Telegram Premium до 4096)
+            SalesStage.OBJECTIONS: 1500,  # Увеличено для развернутых ответов на возражения
+            SalesStage.CONSULTATION_OFFER: 400,  # Умеренно увеличено для предложения
+            SalesStage.SCHEDULING: 500,  # Умеренно увеличено для согласования
+            SalesStage.SUMMARY: 400,  # Умеренно для этапа сводки
         }
 
         return max_lengths.get(stage, None)
@@ -395,7 +444,7 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.4,
-                        "max_tokens": 150,
+                        "max_tokens": 600,  # Увеличено с 150 до 600 для более подробных вопросов
                         "frequency_penalty": 0.3,
                         "presence_penalty": 0.2,
                     }
@@ -404,7 +453,7 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.3,
-                        "max_tokens": 400,
+                        "max_tokens": 2000,  # Значительно увеличено с 400 до 2000 для развернутых презентаций
                         "frequency_penalty": 0.3,
                         "presence_penalty": 0.2,
                     }
@@ -413,7 +462,7 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.35,
-                        "max_tokens": 300,
+                        "max_tokens": 800,  # Увеличено с 300 до 800 для развернутых ответов на возражения
                         "frequency_penalty": 0.25,
                         "presence_penalty": 0.15,
                     }
@@ -432,6 +481,15 @@ class SalesFlow:
                     {
                         "temperature": 0.4,
                         "max_tokens": 180,
+                        "frequency_penalty": 0.2,
+                        "presence_penalty": 0.1,
+                    }
+                )
+            elif stage == SalesStage.SUMMARY:
+                base_params.update(
+                    {
+                        "temperature": 0.4,
+                        "max_tokens": 200,
                         "frequency_penalty": 0.2,
                         "presence_penalty": 0.1,
                     }
@@ -518,6 +576,12 @@ class SalesFlow:
                 data["slots"][slot_name] = slot_value
                 logger.info(f"Auto-extracted slot '{slot_name}': {slot_value}")
 
+        # Обратная совместимость: если заполнен domain, но нет company_domain, копируем
+        if "domain" in data.get("slots", {}) and "company_domain" not in data.get(
+            "slots", {}
+        ):
+            data["slots"]["company_domain"] = data["slots"]["domain"]
+
         # Пересчитываем missing_slots
         self._update_missing_slots(data)
 
@@ -579,6 +643,15 @@ class SalesFlow:
                 intent = data.get("intent", "SALES_AI")
 
             filled_slots = set(data.get("slots", {}).keys())
+
+            # Обратная совместимость: если заполнен domain, считаем что company_domain тоже заполнен
+            if (
+                intent != "REAL_ESTATE"
+                and "domain" in filled_slots
+                and "company_domain" not in filled_slots
+            ):
+                filled_slots.add("company_domain")
+
             if intent == "REAL_ESTATE":
                 required_slots = self.REAL_ESTATE_REQUIRED_SLOTS
             else:
@@ -628,13 +701,50 @@ class SalesFlow:
         if not missing_slots:
             return None
 
-        # Приоритет: сначала основные слоты (goal/purpose, budget, contact)
-        priority_slots = ["goal", "purpose", "budget", "budget_band", "contact"]
-        for priority_slot in priority_slots:
+        # Для REAL_ESTATE используем старую логику приоритетов
+        if intent == "REAL_ESTATE":
+            priority_slots = ["goal", "purpose", "budget", "budget_band", "contact"]
+            for priority_slot in priority_slots:
+                if priority_slot in missing_slots:
+                    return priority_slot
+            return missing_slots[0]
+
+        # Для SALES_AI используем новую логику приоритетов: базовые → бизнес → проект
+        # Приоритет 1: базовые слоты
+        priority1_slots = ["client_name", "company_name", "contact", "company_size"]
+        for priority_slot in priority1_slots:
             if priority_slot in missing_slots:
                 return priority_slot
 
-        # Иначе возвращаем первый из недостающих
+        # Приоритет 2: слоты о бизнесе
+        priority2_slots = [
+            "company_domain",
+            "main_problems",
+            "time_consuming_tasks",
+            "process_volume",
+            "employees_involved",
+            "current_time_cost",
+            "error_rate",
+            "business_revenue",
+            "current_cost",
+        ]
+        for priority_slot in priority2_slots:
+            if priority_slot in missing_slots:
+                return priority_slot
+
+        # Приоритет 3: слоты о проекте
+        priority3_slots = [
+            "goal",
+            "deadline",
+            "budget_band",
+            "data_access",
+            "success_metric",
+        ]
+        for priority_slot in priority3_slots:
+            if priority_slot in missing_slots:
+                return priority_slot
+
+        # Иначе возвращаем первый из недостающих (для обратной совместимости со старым "domain")
         return missing_slots[0]
 
     def _update_missing_slots(self, data: Dict) -> None:
@@ -647,6 +757,14 @@ class SalesFlow:
         intent = data.get("intent", "SALES_AI")
         filled_slots = set(data.get("slots", {}).keys())
 
+        # Обратная совместимость: если заполнен domain, считаем что company_domain тоже заполнен
+        if (
+            intent != "REAL_ESTATE"
+            and "domain" in filled_slots
+            and "company_domain" not in filled_slots
+        ):
+            filled_slots.add("company_domain")
+
         if intent == "REAL_ESTATE":
             required_slots = self.REAL_ESTATE_REQUIRED_SLOTS
         else:
@@ -655,9 +773,7 @@ class SalesFlow:
         missing = required_slots - filled_slots
         data["missing_slots"] = list(missing)
 
-    def update_intent(
-        self, context_data: Optional[str], intent: str
-    ) -> str:
+    def update_intent(self, context_data: Optional[str], intent: str) -> str:
         """
         Обновить intent в контексте.
 
@@ -683,3 +799,21 @@ class SalesFlow:
 
         return json.dumps(data)
 
+    def should_transition_to_summary(
+        self, context_data: Optional[str], intent: Optional[str] = None
+    ) -> bool:
+        """
+        Проверить, нужно ли перейти на этап SUMMARY (все обязательные слоты заполнены).
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+            intent: Тип намерения ("SALES_AI" или "REAL_ESTATE")
+
+        Returns:
+            True если все слоты заполнены и можно перейти на SUMMARY
+        """
+        if not self.enabled:
+            return False
+
+        missing_slots = self.get_missing_slots(context_data, intent)
+        return len(missing_slots) == 0

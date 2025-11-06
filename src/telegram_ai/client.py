@@ -3,10 +3,11 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 from telethon import TelegramClient, events
@@ -23,6 +24,7 @@ from .language_detector import (
     SUPPORTED_LANGUAGES,
 )
 from .memory import Memory
+from .meeting_summary import MeetingSummary
 from .rag import RAGSystem
 from .rate_limiter import RateLimiter, GlobalRateLimiter
 from .sales_flow import SalesFlow, SalesStage
@@ -59,6 +61,7 @@ class TelegramUserClient:
         self.slot_extractor: Optional[SlotExtractor] = None
         self.vector_memory: Optional[VectorMemory] = None
         self.rag_system: Optional[RAGSystem] = None
+        self.meeting_summary: Optional[MeetingSummary] = None
 
         # Инициализируем компоненты
         self._init_components()
@@ -188,6 +191,10 @@ class TelegramUserClient:
                 slot_extractor=self.slot_extractor,
             )
             logger.info("SalesFlow initialized")
+
+        # Meeting Summary (всегда инициализируем для генерации сводок)
+        self.meeting_summary = MeetingSummary()
+        logger.info("MeetingSummary initialized")
 
         # Intent Classifier (всегда включен)
         self.intent_classifier = IntentClassifier(
@@ -804,6 +811,7 @@ class TelegramUserClient:
                                 message_text, user_context_data, current_intent
                             )
                             self.memory.save_user_context(sender.id, user_context_data)
+                                        
                         except Exception as e:
                             logger.error(f"Error auto-extracting slots: {e}", exc_info=True)
                             # Продолжаем работу даже если автоизвлечение не удалось
@@ -1295,6 +1303,58 @@ class TelegramUserClient:
                                     context_dict["last_event_time"] = extracted_time.strftime(
                                         "%Y-%m-%dT%H:%M:%S"
                                     )
+                                    
+                                    # Генерируем и отправляем summary для встречи
+                                    if self.meeting_summary and self.sales_flow:
+                                        try:
+                                            # Получаем слоты из контекста
+                                            slots = self.sales_flow.get_slots(user_context_data)
+                                            
+                                            # Получаем историю диалога
+                                            conversation_history = self.memory.get_context(sender.id, limit=100)
+                                            
+                                            # Получаем текущий этап продаж
+                                            current_stage_str = None
+                                            if user_context_data:
+                                                try:
+                                                    context_data = json.loads(user_context_data)
+                                                    current_stage_str = context_data.get("sales_stage")
+                                                except (json.JSONDecodeError, ValueError):
+                                                    pass
+                                            
+                                            # Получаем имя клиента
+                                            client_name = slots.get("client_name")
+                                            if not client_name and user_context_data:
+                                                try:
+                                                    context_data = json.loads(user_context_data)
+                                                    client_name = context_data.get("name")
+                                                except (json.JSONDecodeError, ValueError):
+                                                    pass
+                                            
+                                            # Генерируем полную сводку
+                                            full_summary = self.meeting_summary.generate_full_summary(
+                                                slots, conversation_history, current_stage_str
+                                            )
+                                            
+                                            # Генерируем отчет для владельца
+                                            owner_report = self.meeting_summary.generate_owner_report(
+                                                client_name, slots, conversation_history, current_stage_str
+                                            )
+                                            
+                                            # Сохраняем summary в контекст
+                                            context_dict["meeting_summary"] = full_summary
+                                            context_dict["meeting_summary_json"] = self.meeting_summary.generate_json_summary(slots)
+                                            
+                                            # Отправляем отчет владельцу
+                                            if owner_report:
+                                                await self.send_summary_to_owner(owner_report)
+                                                logger.info(f"Meeting summary sent to owner for user {sender.id}")
+                                            
+                                            logger.info(f"Meeting summary generated for user {sender.id}")
+                                        except Exception as e:
+                                            logger.error(f"Error generating meeting summary: {e}", exc_info=True)
+                                            # Не прерываем создание встречи при ошибке генерации summary
+                                    
                                     self.memory.save_user_context(sender.id, json.dumps(context_dict))
                                     
                                     # Логируем время в локальной таймзоне для читаемости
@@ -1364,9 +1424,84 @@ class TelegramUserClient:
         except Exception as e:
             logger.error(f"Error handling message: {e}", exc_info=True)
 
+    def _split_long_message(self, message: str, max_length: int = 4000) -> List[str]:
+        """
+        Разбить длинное сообщение на части для отправки в Telegram.
+        
+        Telegram позволяет до 4096 символов, но используем 4000 для безопасности.
+        Разбивает по предложениям/абзацам для лучшей читаемости.
+
+        Args:
+            message: Текст сообщения
+            max_length: Максимальная длина одной части (по умолчанию 4000)
+
+        Returns:
+            Список частей сообщения
+        """
+        if len(message) <= max_length:
+            return [message]
+
+        parts = []
+        # Разбиваем по абзацам (двойной перенос строки)
+        paragraphs = message.split("\n\n")
+        current_part = ""
+
+        for paragraph in paragraphs:
+            # Если текущий абзац + новый параграф помещается - добавляем
+            if len(current_part) + len(paragraph) + 2 <= max_length:
+                if current_part:
+                    current_part += "\n\n" + paragraph
+                else:
+                    current_part = paragraph
+            else:
+                # Если текущий абзац не пуст - сохраняем его
+                if current_part:
+                    parts.append(current_part)
+                    current_part = paragraph
+                else:
+                    # Абзац сам по себе слишком длинный - разбиваем по предложениям
+                    if len(paragraph) > max_length:
+                        sentences = re.split(r'([.!?]\s+)', paragraph)
+                        temp_sentence = ""
+                        
+                        for i in range(0, len(sentences), 2):
+                            if i + 1 < len(sentences):
+                                sentence = sentences[i] + sentences[i + 1]
+                            else:
+                                sentence = sentences[i]
+                            
+                            if len(temp_sentence) + len(sentence) <= max_length:
+                                temp_sentence += sentence
+                            else:
+                                if temp_sentence:
+                                    parts.append(temp_sentence.strip())
+                                temp_sentence = sentence
+                                if len(temp_sentence) > max_length:
+                                    # Даже одно предложение слишком длинное - обрезаем по словам
+                                    words = temp_sentence.split()
+                                    temp_sentence = ""
+                                    for word in words:
+                                        if len(temp_sentence) + len(word) + 1 <= max_length:
+                                            temp_sentence += (" " + word) if temp_sentence else word
+                                        else:
+                                            if temp_sentence:
+                                                parts.append(temp_sentence.strip())
+                                            temp_sentence = word
+                        
+                        if temp_sentence:
+                            current_part = temp_sentence.strip()
+                    else:
+                        current_part = paragraph
+
+        # Добавляем последнюю часть
+        if current_part:
+            parts.append(current_part)
+
+        return parts if parts else [message[:max_length]]
+
     async def safe_reply(self, event: events.NewMessage.Event, message: str, max_retries: int = 3):
         """
-        Безопасная отправка ответа с обработкой FloodWait.
+        Безопасная отправка ответа с обработкой FloodWait и автоматическим разбиением длинных сообщений.
 
         Args:
             event: Событие сообщения
@@ -1381,46 +1516,112 @@ class TelegramUserClient:
         elif hasattr(event, "is_channel") and event.is_channel:
             chat_type = "channel"
 
-        for attempt in range(max_retries):
-            try:
-                await event.reply(message)
-                logger.debug(f"Message sent successfully (attempt {attempt + 1})")
-                return
-            except FloodWaitError as e:
-                wait_seconds = e.seconds
-                logger.warning(
-                    f"FloodWait error: need to wait {wait_seconds} seconds (attempt {attempt + 1}/{max_retries})"
-                )
-                
-                # Записываем FloodWait в историю
-                if self.global_rate_limiter:
-                    self.global_rate_limiter.record_flood_wait(wait_seconds, chat_type)
-                
-                # Критическое предупреждение при длинном ожидании
-                if wait_seconds > 60:
-                    logger.critical(
-                        f"CRITICAL FloodWait: {wait_seconds} seconds! "
-                        f"This indicates potential account risk."
+        # Разбиваем длинные сообщения на части (Telegram лимит 4096 символов)
+        message_parts = self._split_long_message(message, max_length=4000)
+        
+        if len(message_parts) > 1:
+            logger.info(f"Message split into {len(message_parts)} parts (total length: {len(message)} chars)")
+
+        # Отправляем каждую часть
+        for part_index, part in enumerate(message_parts):
+            for attempt in range(max_retries):
+                try:
+                    await event.reply(part)
+                    logger.debug(f"Message part {part_index + 1}/{len(message_parts)} sent successfully (attempt {attempt + 1})")
+                    break
+                except FloodWaitError as e:
+                    wait_seconds = e.seconds
+                    logger.warning(
+                        f"FloodWait error: need to wait {wait_seconds} seconds (attempt {attempt + 1}/{max_retries}, part {part_index + 1}/{len(message_parts)})"
                     )
-                
-                # Ждем указанное время + небольшая задержка для безопасности
-                import asyncio
-                await asyncio.sleep(wait_seconds + 1)
-                
-                # Если это последняя попытка, не продолжаем
-                if attempt == max_retries - 1:
-                    logger.error(
-                        f"Failed to send message after {max_retries} attempts due to FloodWait"
-                    )
-                    return
-            except Exception as e:
-                logger.error(f"Error sending message: {e}", exc_info=True)
-                if attempt == max_retries - 1:
-                    logger.error(f"Failed to send message after {max_retries} attempts")
-                    return
-                # Небольшая задержка перед повторной попыткой
-                import asyncio
-                await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка
+                    
+                    # Записываем FloodWait в историю
+                    if self.global_rate_limiter:
+                        self.global_rate_limiter.record_flood_wait(wait_seconds, chat_type)
+                    
+                    # Критическое предупреждение при длинном ожидании
+                    if wait_seconds > 60:
+                        logger.critical(
+                            f"CRITICAL FloodWait: {wait_seconds} seconds! "
+                            f"This indicates potential account risk."
+                        )
+                    
+                    # Ждем указанное время + небольшая задержка для безопасности
+                    await asyncio.sleep(wait_seconds + 1)
+                    
+                    # Если это последняя попытка, не продолжаем
+                    if attempt == max_retries - 1:
+                        logger.error(
+                            f"Failed to send message part {part_index + 1} after {max_retries} attempts due to FloodWait"
+                        )
+                        return
+                except Exception as e:
+                    logger.error(f"Error sending message part {part_index + 1}: {e}", exc_info=True)
+                    if attempt == max_retries - 1:
+                        logger.error(f"Failed to send message part {part_index + 1} after {max_retries} attempts")
+                        return
+                    # Небольшая задержка перед повторной попыткой
+                    await asyncio.sleep(2 ** attempt)  # Экспоненциальная задержка
+            
+            # Небольшая задержка между частями для избежания rate limits
+            if part_index < len(message_parts) - 1:
+                await asyncio.sleep(0.5)
+
+    async def send_summary_to_owner(self, summary_text: str) -> bool:
+        """
+        Отправить summary владельцу в Telegram.
+
+        Args:
+            summary_text: Текст summary для отправки
+
+        Returns:
+            True если отправка успешна, False иначе
+        """
+        if not self.config.meeting_summary.send_to_owner:
+            logger.debug("Sending summary to owner is disabled")
+            return False
+
+        owner_username = self.config.meeting_summary.owner_username
+        if not owner_username:
+            logger.warning("Owner username not configured")
+            return False
+
+        try:
+            # Получаем entity по username
+            # Убираем @ если есть
+            username_clean = owner_username.lstrip("@")
+            entity = await self.client.get_entity(username_clean)
+            
+            # Разбиваем длинные сообщения
+            message_parts = self._split_long_message(summary_text, max_length=4000)
+            
+            # Отправляем каждую часть
+            for part_index, part in enumerate(message_parts):
+                try:
+                    await self.client.send_message(entity, part)
+                    logger.info(f"Summary sent to owner {owner_username} (part {part_index + 1}/{len(message_parts)})")
+                    
+                    # Небольшая задержка между частями
+                    if part_index < len(message_parts) - 1:
+                        await asyncio.sleep(0.5)
+                except FloodWaitError as e:
+                    wait_seconds = e.seconds
+                    logger.warning(f"FloodWait when sending summary to owner: {wait_seconds} seconds")
+                    await asyncio.sleep(wait_seconds + 1)
+                    # Повторная попытка
+                    await self.client.send_message(entity, part)
+                    logger.info(f"Summary sent to owner after FloodWait (part {part_index + 1}/{len(message_parts)})")
+                except Exception as e:
+                    logger.error(f"Error sending summary to owner: {e}", exc_info=True)
+                    return False
+            
+            return True
+        except ValueError as e:
+            logger.error(f"Owner username not found: {owner_username}. Error: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending summary to owner: {e}", exc_info=True)
+            return False
 
     def _should_handle_message(self, event: events.NewMessage.Event) -> bool:
         """

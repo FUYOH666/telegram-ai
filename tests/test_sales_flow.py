@@ -290,3 +290,100 @@ def test_sales_flow_update_intent_new_context(sales_flow):
 
     data = json.loads(updated)
     assert data["intent"] == "SALES_AI"
+
+
+def test_sales_flow_summary_stage_exists(sales_flow):
+    """Тест наличия этапа SUMMARY."""
+    assert SalesStage.SUMMARY in SalesStage
+
+
+def test_sales_flow_summary_stage_prompt_modifier(sales_flow):
+    """Тест получения модификатора промпта для этапа SUMMARY."""
+    modifier = sales_flow.get_stage_prompt_modifier(SalesStage.SUMMARY)
+    assert isinstance(modifier, str)
+    assert len(modifier) > 0
+    assert "сводка" in modifier.lower() or "встреч" in modifier.lower()
+
+
+def test_sales_flow_new_slots_in_required(sales_flow):
+    """Тест наличия новых слотов в обязательных."""
+    assert "client_name" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "company_name" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "company_size" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "company_domain" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "main_problems" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "time_consuming_tasks" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "process_volume" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "employees_involved" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "current_time_cost" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "error_rate" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "business_revenue" in sales_flow.SALES_REQUIRED_SLOTS
+    assert "current_cost" in sales_flow.SALES_REQUIRED_SLOTS
+
+
+def test_sales_flow_new_slot_prompts(sales_flow):
+    """Тест наличия промптов для новых слотов."""
+    assert "client_name" in sales_flow.SALES_SLOT_PROMPTS
+    assert "company_name" in sales_flow.SALES_SLOT_PROMPTS
+    assert "company_size" in sales_flow.SALES_SLOT_PROMPTS
+    assert "company_domain" in sales_flow.SALES_SLOT_PROMPTS
+    assert "main_problems" in sales_flow.SALES_SLOT_PROMPTS
+    assert "time_consuming_tasks" in sales_flow.SALES_SLOT_PROMPTS
+
+
+def test_sales_flow_should_transition_to_summary(sales_flow):
+    """Тест проверки перехода на SUMMARY."""
+    # Пустой контекст - не готов
+    assert not sales_flow.should_transition_to_summary(None, "SALES_AI")
+
+    # Контекст со всеми заполненными слотами - готов
+    all_slots = {slot: f"value_{slot}" for slot in sales_flow.SALES_REQUIRED_SLOTS}
+    context_data = json.dumps({"intent": "SALES_AI", "slots": all_slots})
+    assert sales_flow.should_transition_to_summary(context_data, "SALES_AI")
+
+    # Контекст с неполными слотами - не готов
+    partial_slots = {"client_name": "Иван", "company_name": "ООО"}
+    context_data = json.dumps({"intent": "SALES_AI", "slots": partial_slots})
+    assert not sales_flow.should_transition_to_summary(context_data, "SALES_AI")
+
+
+def test_sales_flow_get_next_slot_priorities(sales_flow):
+    """Тест правильного порядка приоритетов слотов."""
+    # Пустой контекст - должен вернуть базовый слот (приоритет 1)
+    next_slot = sales_flow.get_next_slot_to_ask(None, "SALES_AI")
+    assert next_slot in ["client_name", "company_name", "contact", "company_size"]
+
+    # Заполняем базовые слоты - должен вернуть слот о бизнесе (приоритет 2)
+    context_data = json.dumps(
+        {
+            "intent": "SALES_AI",
+            "slots": {
+                "client_name": "Иван",
+                "company_name": "ООО",
+                "contact": "+79991234567",
+                "company_size": "50 человек",
+            },
+        }
+    )
+    next_slot = sales_flow.get_next_slot_to_ask(context_data, "SALES_AI")
+    assert next_slot in [
+        "company_domain",
+        "main_problems",
+        "time_consuming_tasks",
+        "process_volume",
+        "employees_involved",
+        "current_time_cost",
+        "error_rate",
+        "business_revenue",
+        "current_cost",
+    ]
+
+
+def test_sales_flow_domain_compatibility(sales_flow):
+    """Тест обратной совместимости со старым полем domain."""
+    # Если заполнен domain, но нет company_domain - должен считаться заполненным
+    context_data = json.dumps(
+        {"intent": "SALES_AI", "slots": {"domain": "медицина"}}
+    )
+    missing = sales_flow.get_missing_slots(context_data, "SALES_AI")
+    assert "company_domain" not in missing  # Должен считаться заполненным

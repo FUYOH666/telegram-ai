@@ -243,3 +243,7 @@ rag:
   max_results: 5 # максимальное количество результатов поиска (увеличено для лучшего покрытия)
   min_score: 0.7 # минимальный score для включения результата в контекст (0.0-1.0)
   auto_load_on_startup: true # автоматически загружать базу знаний при старте приложения
+
+meeting_summary:
+  send_to_owner: true # отправлять summary владельцу при создании встречи
+  owner_username: "@WuWeiBuild" # username владельца для отправки summary

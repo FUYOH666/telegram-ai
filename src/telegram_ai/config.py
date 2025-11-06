@@ -332,6 +332,22 @@ class RAGConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RAG_")
 
 
+class MeetingSummaryConfig(BaseSettings):
+    """Конфигурация генерации summary для встреч."""
+
+    send_to_owner: bool = Field(
+        default=True,
+        description="Отправлять summary владельцу при создании встречи",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    owner_username: str = Field(
+        default="@WuWeiBuild",
+        description="Username владельца для отправки summary (например, @WuWeiBuild)",
+    )
+
+    model_config = SettingsConfigDict(env_prefix="MEETING_SUMMARY_")
+
+
 class Config(BaseSettings):
     """Основная конфигурация приложения."""
 
@@ -346,6 +362,9 @@ class Config(BaseSettings):
     web_search: WebSearchConfig
     intent_classifier: IntentClassifierConfig
     rag: RAGConfig
+    meeting_summary: MeetingSummaryConfig = Field(
+        default_factory=MeetingSummaryConfig, description="Конфигурация summary для встреч"
+    )
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "Config":
@@ -439,6 +458,15 @@ class Config(BaseSettings):
             rag_data["enabled"] = bool(enabled_val)
         rag = RAGConfig(**rag_data)
 
+        # Meeting Summary конфигурация
+        meeting_summary_data = yaml_data.get("meeting_summary", {})
+        enabled_val = meeting_summary_data.get("send_to_owner", True)
+        if isinstance(enabled_val, str):
+            meeting_summary_data["send_to_owner"] = enabled_val.lower() in ("true", "1", "yes")
+        elif not isinstance(enabled_val, bool):
+            meeting_summary_data["send_to_owner"] = bool(enabled_val)
+        meeting_summary = MeetingSummaryConfig(**meeting_summary_data)
+
         return cls(
             telegram=telegram,
             ai_server=ai_server,
@@ -451,6 +479,7 @@ class Config(BaseSettings):
             web_search=web_search,
             intent_classifier=intent_classifier,
             rag=rag,
+            meeting_summary=meeting_summary,
         )
 
     @staticmethod
