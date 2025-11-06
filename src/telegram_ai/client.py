@@ -1,5 +1,6 @@
 """Telegram User Client через Telethon для личного аккаунта."""
 
+import asyncio
 import json
 import logging
 import time
@@ -323,6 +324,29 @@ class TelegramUserClient:
                 sender = await event.get_sender()
                 chat = await event.get_chat()
                 message_text = event.message.message or ""
+                
+                # Проверяем, включен ли typing indicator и умное распределение
+                smart_distribution = (
+                    self.config.rate_limiting.smart_distribution
+                    and self.config.rate_limiting.smart_distribution.enabled
+                )
+                typing_enabled = (
+                    smart_distribution
+                    and self.config.rate_limiting.smart_distribution.typing_indicator_enabled
+                )
+                
+                # Определяем тип чата для умных лимитов
+                chat_type = None
+                chat_type_limit = None
+                if event.is_private:
+                    chat_type = "private"
+                    chat_type_limit = self.config.rate_limiting.chat_type_limits.private
+                elif event.is_group:
+                    chat_type = "group"
+                    chat_type_limit = self.config.rate_limiting.chat_type_limits.group
+                elif event.is_channel:
+                    chat_type = "channel"
+                    chat_type_limit = self.config.rate_limiting.chat_type_limits.channel
 
                 # Обработка голосовых сообщений
                 # Проверяем голосовые сообщения через несколько способов для надежности
@@ -463,19 +487,6 @@ class TelegramUserClient:
                         logger.warning(f"Global rate limit exceeded: {global_reason}")
                         await self.safe_reply(event, global_reason)
                         return
-
-                # Определяем тип чата для умных лимитов
-                chat_type = None
-                chat_type_limit = None
-                if event.is_private:
-                    chat_type = "private"
-                    chat_type_limit = self.config.rate_limiting.chat_type_limits.private
-                elif event.is_group:
-                    chat_type = "group"
-                    chat_type_limit = self.config.rate_limiting.chat_type_limits.group
-                elif event.is_channel:
-                    chat_type = "channel"
-                    chat_type_limit = self.config.rate_limiting.chat_type_limits.channel
                 
                 # Проверка rate limit с учетом типа чата (только для текстовых сообщений)
                 if message_text:
@@ -490,25 +501,58 @@ class TelegramUserClient:
                         )
                         await self.safe_reply(event, reason)
                         return
-
-                # Обработка команд Google Calendar
+                
+                # Обработка команд Google Calendar (перед основной обработкой, без typing)
                 if self.calendar and message_text.startswith("/"):
                     handled = await self._handle_calendar_command(event, message_text)
                     if handled:
                         return
 
-                # Сохраняем сообщение пользователя (только если есть текст)
+                # Получаем username для дальнейшей обработки
                 username = getattr(sender, "username", None)
-                # Извлекаем имя пользователя (first_name или full_name)
-                user_first_name = getattr(sender, "first_name", None)
-                user_last_name = getattr(sender, "last_name", None)
-                user_full_name = None
-                if user_first_name:
-                    user_full_name = (
-                        f"{user_first_name} {user_last_name}".strip()
-                        if user_last_name
-                        else user_first_name
+                
+                # Оборачиваем всю обработку в typing indicator (если включен)
+                # Typing показывается автоматически во время всей обработки
+                if typing_enabled:
+                    # Используем async with для автоматического управления typing indicator
+                    async with event.client.action(event.chat_id, 'typing'):
+                        await self._process_message_internal(
+                            event, sender, chat, message_text, username,
+                            chat_type, chat_type_limit, smart_distribution
+                        )
+                else:
+                    # Обработка без typing indicator (для обратной совместимости)
+                    await self._process_message_internal(
+                        event, sender, chat, message_text, username,
+                        chat_type, chat_type_limit, smart_distribution
                     )
+            
+            except Exception as e:
+                logger.error(f"Error handling message: {e}", exc_info=True)
+
+    async def _process_message_internal(
+        self,
+        event: events.NewMessage.Event,
+        sender,
+        chat,
+        message_text: str,
+        username: Optional[str],
+        chat_type: Optional[str],
+        chat_type_limit: Optional[int],
+        smart_distribution: bool,
+    ):
+        """Внутренняя обработка сообщения (может быть обернута в typing indicator)."""
+        try:
+            # Извлекаем имя пользователя (first_name или full_name)
+            user_first_name = getattr(sender, "first_name", None)
+            user_last_name = getattr(sender, "last_name", None)
+            user_full_name = None
+            if user_first_name:
+                user_full_name = (
+                    f"{user_first_name} {user_last_name}".strip()
+                    if user_last_name
+                    else user_first_name
+                )
                 
                 # Сохраняем имя пользователя в контексте если еще не сохранено
                 if user_full_name:
@@ -689,6 +733,7 @@ class TelegramUserClient:
 
                 # Работа со скриптом продаж
                 max_response_length = None
+                current_stage = None
                 
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
@@ -980,6 +1025,23 @@ class TelegramUserClient:
                     ai_request_time = time.time() - ai_request_start
                     logger.info(f"✅ AI response received in {ai_request_time:.2f}s ({len(response)} chars): {response[:150]}...")
                     logger.debug(f"Full AI response: {response}")
+
+                    # Рассчитываем оптимальный интервал перед отправкой (если включено умное распределение)
+                    if smart_distribution and self.rate_limiter.enabled:
+                        # Используем лимит типа чата если он установлен
+                        messages_per_minute = chat_type_limit if chat_type_limit else self.config.rate_limiting.messages_per_minute
+                        optimal_interval, needs_wait = self.rate_limiter.calculate_optimal_interval(
+                            user_id=sender.id,
+                            messages_per_minute=messages_per_minute
+                        )
+                        
+                        if needs_wait and optimal_interval > 0:
+                            logger.debug(
+                                f"Waiting {optimal_interval:.2f}s before sending message "
+                                f"(user_id={sender.id}, chat_type={chat_type})"
+                            )
+                            # Ждем оптимальный интервал (typing продолжает показываться если мы в контексте)
+                            await asyncio.sleep(optimal_interval)
 
                     # Отправляем ответ
                     await self.safe_reply(event, response)
@@ -1299,8 +1361,8 @@ class TelegramUserClient:
                     
                     await event.reply(user_error)
 
-            except Exception as e:
-                logger.error(f"Error handling message: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error handling message: {e}", exc_info=True)
 
     async def safe_reply(self, event: events.NewMessage.Event, message: str, max_retries: int = 3):
         """

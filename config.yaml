@@ -209,6 +209,11 @@ rate_limiting:
     private: 25  # ⬆️ увеличено с 20 до 25 для более активного общения в личных чатах
     group: 12    # ⬆️ немного увеличено с 10 до 12
     channel: 5   # оставлено консервативным (каналы редко требуют частых сообщений)
+  
+  # Умное распределение сообщений и typing indicator
+  smart_distribution:
+    enabled: true
+    typing_indicator_enabled: true
 
 asr_server:
   base_url: http://100.93.82.48:8001

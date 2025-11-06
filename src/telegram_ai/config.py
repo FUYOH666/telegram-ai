@@ -186,6 +186,21 @@ class ChatTypeRateLimitsConfig(BaseSettings):
     )
 
 
+class SmartDistributionConfig(BaseSettings):
+    """Конфигурация умного распределения сообщений и typing indicator."""
+
+    enabled: bool = Field(
+        default=True, description="Включить умное распределение сообщений"
+    )
+    typing_indicator_enabled: bool = Field(
+        default=True, description="Включить показ typing indicator во время обработки"
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="RATE_LIMITING_SMART_DISTRIBUTION_"
+    )
+
+
 class RateLimitingConfig(BaseSettings):
     """Конфигурация rate limiting."""
 
@@ -215,6 +230,9 @@ class RateLimitingConfig(BaseSettings):
     )
     chat_type_limits: ChatTypeRateLimitsConfig = Field(
         default_factory=ChatTypeRateLimitsConfig, description="Лимиты по типам чатов"
+    )
+    smart_distribution: Optional[SmartDistributionConfig] = Field(
+        default=None, description="Настройки умного распределения сообщений"
     )
 
     model_config = SettingsConfigDict(env_prefix="RATE_LIMITING_")
@@ -381,6 +399,13 @@ class Config(BaseSettings):
         # Лимиты по типам чатов
         chat_type_limits_data = rate_limiting_data.pop("chat_type_limits", {})
         rate_limiting_data["chat_type_limits"] = ChatTypeRateLimitsConfig(**chat_type_limits_data)
+        
+        # Умное распределение сообщений
+        smart_distribution_data = rate_limiting_data.pop("smart_distribution", {})
+        if smart_distribution_data:
+            rate_limiting_data["smart_distribution"] = SmartDistributionConfig(**smart_distribution_data)
+        else:
+            rate_limiting_data["smart_distribution"] = None
         
         rate_limiting = RateLimitingConfig(**rate_limiting_data)
 

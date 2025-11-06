@@ -322,6 +322,92 @@ class RateLimiter:
         finally:
             session.close()
 
+    def calculate_optimal_interval(
+        self,
+        user_id: int,
+        messages_per_minute: Optional[int] = None,
+    ) -> Tuple[float, bool]:
+        """
+        Рассчитать оптимальный интервал до следующего сообщения.
+
+        Args:
+            user_id: ID пользователя
+            messages_per_minute: Лимит сообщений в минуту (для типов чатов)
+
+        Returns:
+            Tuple[интервал_в_секундах, нужно_ли_ждать]
+        """
+        if not self.enabled:
+            return 0.0, False
+
+        # Используем переданный лимит или базовый
+        effective_limit = (
+            messages_per_minute
+            if messages_per_minute is not None
+            else self.messages_per_minute
+        )
+
+        session = self._get_session()
+        try:
+            now = datetime.now(timezone.utc)
+            rate_limit = (
+                session.query(RateLimit).filter(RateLimit.user_id == user_id).first()
+            )
+
+            # Если пользователь еще не отправлял сообщений - не нужно ждать
+            if not rate_limit:
+                return 0.0, False
+
+            # Получаем текущие счетчики
+            window_start_minute = rate_limit.window_start_minute
+            if window_start_minute.tzinfo is None:
+                window_start_minute = window_start_minute.replace(tzinfo=timezone.utc)
+
+            # Вычисляем прошедшее время в текущей минуте
+            elapsed_seconds = (now - window_start_minute).total_seconds()
+
+            # Если прошло больше минуты - окно сбросится, не нужно ждать
+            if elapsed_seconds >= 60:
+                return 0.0, False
+
+            # Текущее количество использованных сообщений
+            used_count = rate_limit.message_count_minute
+
+            # Оставшееся время в текущей минуте
+            remaining_seconds = 60.0 - elapsed_seconds
+
+            # Оставшиеся слоты для сообщений
+            remaining_slots = effective_limit - used_count
+
+            # Если лимит уже исчерпан или близок к исчерпанию
+            if remaining_slots <= 0:
+                # Нужно ждать до начала следующей минуты
+                interval = remaining_seconds
+                return max(interval, self.min_interval_seconds), True
+
+            # Рассчитываем оптимальный интервал для равномерного распределения
+            if remaining_slots > 0:
+                interval = remaining_seconds / remaining_slots
+            else:
+                interval = 0.0
+
+            # Ограничиваем минимальным интервалом
+            interval = max(interval, self.min_interval_seconds)
+
+            # Если интервал очень маленький (< 0.1 сек) - не нужно ждать
+            needs_wait = interval >= 0.1
+
+            logger.debug(
+                f"Optimal interval for user {user_id}: {interval:.2f}s "
+                f"(used: {used_count}/{effective_limit}, remaining: {remaining_seconds:.1f}s, "
+                f"slots: {remaining_slots}, needs_wait: {needs_wait})"
+            )
+
+            return interval, needs_wait
+
+        finally:
+            session.close()
+
     def block_user(self, user_id: int, reason: str):
         """
         Заблокировать пользователя на указанное время.

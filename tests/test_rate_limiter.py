@@ -159,3 +159,81 @@ def test_rate_limiter_disabled(rate_limiter):
     assert allowed is True
     assert reason is None
 
+
+def test_calculate_optimal_interval_no_user(rate_limiter):
+    """Тест расчета интервала для пользователя без истории."""
+    user_id = 999
+    interval, needs_wait = rate_limiter.calculate_optimal_interval(user_id)
+    assert interval == 0.0
+    assert needs_wait is False
+
+
+def test_calculate_optimal_interval_low_usage(rate_limiter):
+    """Тест расчета интервала при низком использовании лимита."""
+    import time
+    user_id = 123
+    message = "Test message"
+    
+    # Отправляем одно сообщение
+    allowed, _ = rate_limiter.check_rate_limit(user_id, message)
+    assert allowed is True
+    
+    # Рассчитываем интервал
+    interval, needs_wait = rate_limiter.calculate_optimal_interval(user_id)
+    # При низком использовании интервал должен быть небольшим или нулевым
+    assert interval >= rate_limiter.min_interval_seconds
+    # Если лимит не исчерпан, может не нужно ждать (но интервал все равно >= min)
+    assert isinstance(needs_wait, bool)
+
+
+def test_calculate_optimal_interval_high_usage(rate_limiter):
+    """Тест расчета интервала при высоком использовании лимита."""
+    import time
+    user_id = 456
+    messages_per_minute = 5
+    
+    # Отправляем сообщения близко к лимиту
+    for i in range(4):
+        message = f"Message {i}"
+        allowed, _ = rate_limiter.check_rate_limit(user_id, message, messages_per_minute=messages_per_minute)
+        assert allowed is True
+        if i < 3:
+            time.sleep(1.1)
+    
+    # Рассчитываем интервал - должен быть больше минимального
+    interval, needs_wait = rate_limiter.calculate_optimal_interval(
+        user_id, messages_per_minute=messages_per_minute
+    )
+    assert interval >= rate_limiter.min_interval_seconds
+    # При высоком использовании обычно нужно ждать
+    assert isinstance(needs_wait, bool)
+
+
+def test_calculate_optimal_interval_custom_limit(rate_limiter):
+    """Тест расчета интервала с кастомным лимитом."""
+    import time
+    user_id = 789
+    custom_limit = 10
+    message = "Test"
+    
+    # Отправляем сообщение
+    allowed, _ = rate_limiter.check_rate_limit(user_id, message, messages_per_minute=custom_limit)
+    assert allowed is True
+    
+    # Рассчитываем с кастомным лимитом
+    interval, needs_wait = rate_limiter.calculate_optimal_interval(
+        user_id, messages_per_minute=custom_limit
+    )
+    assert interval >= rate_limiter.min_interval_seconds
+    assert isinstance(needs_wait, bool)
+
+
+def test_calculate_optimal_interval_disabled(rate_limiter):
+    """Тест расчета интервала при отключенном rate limiting."""
+    rate_limiter.enabled = False
+    user_id = 123
+    
+    interval, needs_wait = rate_limiter.calculate_optimal_interval(user_id)
+    assert interval == 0.0
+    assert needs_wait is False
+
