@@ -306,7 +306,7 @@ MIT License - см. [LICENSE](LICENSE) для деталей.
 ## Контакты
 
 - **GitHub**: [@FUYOH666](https://github.com/FUYOH666)
-- **Telegram**: [@ScanovichAI](https://t.me/ScanovichAI)
+- **Telegram**: [@ScanovichAI](https://t.me/ScanovichAI) - пообщайтесь с живым примером бота!
 - **Email**: iamfuyoh@gmail.com
 
 ## Автор
