@@ -1,12 +1,24 @@
 [project]
 name = "telegram-ai-platform"
 version = "0.7.0"
-description = "Telegram AI Assistant Platform with microservices architecture"
+description = "Modern Telegram AI Assistant Platform with microservices architecture, LangChain, PostgreSQL, Redis, and REST API"
 readme = "README.md"
 authors = [
     { name = "FUYOH666", email = "iamfuyoh@gmail.com" }
 ]
 requires-python = ">=3.12"
+license = { text = "MIT" }
+keywords = ["telegram", "ai", "assistant", "llm", "rag", "microservices", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     # Core dependencies
     "pydantic>=2.0.0,<3.0.0",

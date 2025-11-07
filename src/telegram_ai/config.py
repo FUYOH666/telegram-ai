@@ -22,7 +22,7 @@ class TelegramConfig(BaseSettings):
     api_hash: str = Field(..., description="API Hash из my.telegram.org")
     phone: str = Field(..., description="Номер телефона в формате +7XXXXXXXXXX")
     session_path: str = Field(
-        default="./sessions/scanovichai.session",
+        default="./sessions/your_bot.session",
         description="Путь к файлу сессии Telethon",
     )
     handle_private_chats: bool = Field(
@@ -38,7 +38,7 @@ class AIServerConfig(BaseSettings):
     """Конфигурация AI-сервера."""
 
     base_url: str = Field(
-        default="http://100.93.82.48:8000", description="Базовый URL AI-сервера"
+        default="http://localhost:8000", description="Базовый URL AI-сервера (vLLM или OpenAI-compatible API)"
     )
     api_key: Optional[str] = Field(
         default=None, description="API ключ (опционально)"
@@ -242,9 +242,9 @@ class ASRServerConfig(BaseSettings):
     """Конфигурация ASR сервера."""
 
     base_url: str = Field(
-        default="http://100.93.82.48:8001", description="Базовый URL ASR сервера"
+        default="http://localhost:8001", description="Базовый URL ASR сервера для транскрибации голосовых сообщений"
     )
-    timeout: int = Field(default=60, description="Таймаут запроса в секундах")
+    timeout: int = Field(default=180, description="Таймаут запроса в секундах (для длинных голосовых сообщений)")
     enabled: bool = Field(default=True, description="Включить обработку голосовых сообщений")
 
     model_config = SettingsConfigDict(env_prefix="ASR_SERVER_")
@@ -341,8 +341,8 @@ class MeetingSummaryConfig(BaseSettings):
         json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
     )
     owner_username: str = Field(
-        default="@WuWeiBuild",
-        description="Username владельца для отправки summary (например, @WuWeiBuild)",
+        default="@your_username",
+        description="Username владельца для отправки summary (например, @your_username)",
     )
 
     model_config = SettingsConfigDict(env_prefix="MEETING_SUMMARY_")

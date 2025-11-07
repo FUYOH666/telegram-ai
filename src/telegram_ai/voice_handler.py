@@ -31,23 +31,25 @@ class VoiceHandler:
         self.timeout = timeout
         self.enabled = enabled
 
-        # Настраиваем таймауты: отдельно для подключения и чтения
-        # Для длинных аудио файлов нужен больший таймаут на чтение
+        # Настраиваем таймауты: отдельно для подключения, чтения и записи
+        # Для длинных аудио файлов нужны большие таймауты
+        # write timeout должен быть достаточным для загрузки больших файлов (до 60 сек аудио)
+        self.write_timeout = max(timeout * 0.5, 60.0)  # Минимум 60 секунд для загрузки файла
         timeout_config = httpx.Timeout(
             connect=15.0,  # Таймаут подключения: 15 секунд
             read=float(timeout),  # Таймаут чтения: настраиваемый (для обработки длинных аудио)
-            write=30.0,  # Таймаут записи: 30 секунд (загрузка файла может занять время)
+            write=self.write_timeout,  # Таймаут записи: минимум 60 секунд (загрузка файла может занять время)
             pool=10.0,  # Таймаут пула соединений: 10 секунд
         )
         self.client = httpx.AsyncClient(timeout=timeout_config)
 
         logger.info(
             f"VoiceHandler initialized: base_url={self.base_url}, "
-            f"enabled={enabled}, timeout={timeout}"
+            f"enabled={enabled}, timeout={timeout}s (read={timeout}s, write={self.write_timeout:.1f}s)"
         )
 
     async def transcribe_voice(
-        self, audio_file_path: Path, language: Optional[str] = None
+        self, audio_file_path: Path, language: Optional[str] = None, duration: Optional[int] = None
     ) -> str:
         """
         Транскрибировать голосовое сообщение.
@@ -55,6 +57,7 @@ class VoiceHandler:
         Args:
             audio_file_path: Путь к аудио файлу
             language: Код языка (опционально, например "ru", "en")
+            duration: Длительность аудио в секундах (опционально, для логирования)
 
         Returns:
             Транскрибированный текст
@@ -74,8 +77,10 @@ class VoiceHandler:
         try:
             # Получаем размер файла для логирования
             file_size = audio_file_path.stat().st_size
+            duration_info = f", duration: {duration}s" if duration else ""
             logger.info(
-                f"Transcribing audio file: {audio_file_path} (size: {file_size} bytes)"
+                f"Transcribing audio file: {audio_file_path} (size: {file_size} bytes{duration_info}, "
+                f"timeout: {self.timeout}s read, {self.write_timeout:.1f}s write)"
             )
 
             # Определяем MIME-тип по расширению файла

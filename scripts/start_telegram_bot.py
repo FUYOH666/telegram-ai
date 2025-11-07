@@ -16,6 +16,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
+# Подавляем ошибки телеметрии ChromaDB (не критичные)
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+# Подавляем предупреждения о file_cache в Google API
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+
 logger = logging.getLogger(__name__)
 
 

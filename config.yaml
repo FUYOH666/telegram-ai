@@ -21,19 +21,19 @@ telegram:
   api_id: ${TELEGRAM_API_ID}
   api_hash: ${TELEGRAM_API_HASH}
   phone: ${TELEGRAM_PHONE}
-  session_path: ./services/telegram-bot/sessions/scanovichai.session  # Путь к существующей сессии
+  session_path: ${TELEGRAM_SESSION_PATH:./sessions/your_bot.session}  # Путь к файлу сессии Telethon
   # Фильтры для обработки сообщений
   handle_private_chats: true # личные чаты
   handle_groups: false # группы
   handle_channels: false # каналы
 
 ai_server:
-  base_url: http://100.93.82.48:8000  # Существующий vLLM сервер
+  base_url: ${AI_SERVER_BASE_URL:http://localhost:8000}  # Базовый URL AI-сервера (vLLM или OpenAI-compatible API)
   api_key: ${AI_SERVER_API_KEY} # опционально
   model: models/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit  # Или другая модель
   timeout: 30 # Оптимизировано под быструю модель Qwen3-30B
   max_retries: 3
-  max_tokens: 8192 # с учетом max_model_len=12384 для Qwen3-30B
+  max_tokens: 4000 # Консервативное значение (max_model_len=12384, но нужно оставить место для входного контекста)
   system_prompt: |
     ⚠️ **КРИТИЧЕСКИ ВАЖНО: Твоя роль — консультант и помощник от лица Scanovich.ai. Сначала слушай проблему клиента, понимай его потребности, проявляй эмпатию. ПОСЛЕ того как понял проблему — естественно предлагай как мы можем помочь или создать решение для их задачи. Говори от первого лица ("я могу помочь", "мы создаем", "я разрабатываю"). Упоминай что мы можем сделать для их бизнеса естественно, но НЕ навязывай и НЕ рассказывай про услуги без контекста их проблемы.**
     
@@ -211,7 +211,7 @@ rate_limiting:
     typing_indicator_enabled: true
 
 asr_server:
-  base_url: http://100.93.82.48:8001  # Существующий ASR сервер
+  base_url: ${ASR_SERVER_BASE_URL:http://localhost:8001}  # Базовый URL ASR сервера для транскрибации голосовых сообщений
   timeout: 180  # Увеличено с 60 до 180 секунд для длинных голосовых сообщений (до 60 секунд аудио + обработка)
   enabled: true
 
@@ -241,4 +241,4 @@ rag:
 
 meeting_summary:
   send_to_owner: true # отправлять summary владельцу при создании встречи
-  owner_username: "@WuWeiBuild" # username владельца для отправки summary
+  owner_username: ${MEETING_OWNER_USERNAME:@your_username} # username владельца для отправки summary

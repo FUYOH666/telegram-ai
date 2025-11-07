@@ -323,19 +323,23 @@ class SalesFlow:
         """
         modifiers = {
             SalesStage.GREETING: (
-                "КРИТИЧЕСКИ ВАЖНО: Сейчас этап приветствия. Твой ответ должен быть КОРОТКИМ - максимум 1-2 предложения (до 150 символов).\n\n"
+                "КРИТИЧЕСКИ ВАЖНО: Сейчас этап приветствия. Твой ответ должен быть КОРОТКИМ - максимум 1-2 предложения (до 200 символов).\n\n"
                 "Правила представления:\n"
                 "- Представься как Александр из Scanovich.ai ТОЛЬКО если еще не представлялся этому пользователю (проверь флаг introduced в контексте)\n"
-                "- Если уже представлялся - просто поприветствуй дружелюбно, без повторения представления\n\n"
+                "- Если уже представлялся - просто поприветствуй дружелюбно, без повторения представления\n"
+                "- ВАЖНО: При первом знакомстве (когда флаг introduced отсутствует или False) ОБЯЗАТЕЛЬНО спроси имя пользователя вежливо\n\n"
                 "Примеры хороших ответов (первое знакомство):\n"
-                "- 'Привет! Я Александр из Scanovich.ai. Чем могу помочь?'\n"
-                "- 'Привет! Меня зовут Александр. Как дела?'\n\n"
+                "- 'Привет! Я Александр из Scanovich.ai. Как вас зовут?'\n"
+                "- 'Здравствуйте! Меня зовут Александр. А как вас зовут?'\n"
+                "- 'Привет! Я Александр. Очень приятно познакомиться! Как вас зовут?'\n\n"
                 "Примеры хороших ответов (уже знакомы):\n"
                 "- 'Привет! Чем могу помочь?'\n"
-                "- 'Привет! Как дела?'\n\n"
+                "- 'Привет! Как дела?'\n"
+                "- Если знаешь имя: 'Привет, [имя]! Чем могу помочь?'\n\n"
                 "Пример плохого ответа: длинное развернутое сообщение с подробным описанием компании или проектов.\n\n"
                 "Дополнительные правила:\n"
                 "- Если знаешь имя пользователя (из контекста) — используй его, но не в каждом сообщении\n"
+                "- При первом знакомстве ВСЕГДА спроси имя вежливо\n"
                 "- Спроси чем можешь помочь, но НЕ пиши длинные сообщения\n"
                 "- На короткие сообщения отвечай коротко\n"
                 "- ЗАПРЕЩЕНО упоминать услуги, проекты или любые детали до того, как пользователь спросит"
@@ -432,24 +436,19 @@ class SalesFlow:
     def get_stage_max_length(self, stage: SalesStage) -> Optional[int]:
         """
         Получить максимальную длину ответа для этапа (в символах).
+        
+        DEPRECATED: Всегда возвращает None. Единственный лимит - лимит Telegram (4096 символов),
+        который обрабатывается автоматически через _split_long_message.
 
         Args:
             stage: Этап скрипта продаж
 
         Returns:
-            Максимальная длина ответа в символах или None если ограничения нет
+            Всегда None - без ограничений по длине ответа
         """
-        max_lengths = {
-            SalesStage.GREETING: 150,  # Очень коротко для приветствия
-            SalesStage.NEEDS_DISCOVERY: None,  # Без лимита - для развернутых ответов на длинные транскрипты
-            SalesStage.PRESENTATION: None,  # Без лимита - для полных презентаций (Telegram сам ограничит до 4096)
-            SalesStage.OBJECTIONS: 2500,  # Увеличено для детальных ответов на возражения
-            SalesStage.CONSULTATION_OFFER: 600,  # Умеренно увеличено для предложения
-            SalesStage.SCHEDULING: 500,  # Умеренно для согласования
-            SalesStage.SUMMARY: 400,  # Умеренно для этапа сводки
-        }
-
-        return max_lengths.get(stage, None)
+        # Убраны все лимиты - единственный лимит это лимит Telegram (4096 символов)
+        # который обрабатывается автоматически в _split_long_message
+        return None
 
     def get_generation_params(
         self, stage: SalesStage, intent: Optional[str] = None
@@ -462,12 +461,15 @@ class SalesFlow:
             intent: Тип намерения ("SALES_AI", "REAL_ESTATE", "SMALL_TALK")
 
         Returns:
-            Словарь с параметрами генерации (temperature, max_tokens, top_p, frequency_penalty, presence_penalty)
+            Словарь с параметрами генерации (temperature, top_p, frequency_penalty, presence_penalty).
+            max_tokens не указывается - используется базовый из config.yaml (8192).
+            Единственный лимит длины - лимит Telegram (4096 символов), обрабатывается автоматически.
         """
         # Базовые параметры по умолчанию
+        # max_tokens убран - используется только базовый из config.yaml (8192)
+        # Единственный лимит - лимит Telegram (4096 символов), который обрабатывается автоматически
         base_params = {
             "temperature": 0.3,
-            "max_tokens": 300,
             "top_p": 0.9,
             "frequency_penalty": 0.3,
             "presence_penalty": 0.2,
@@ -478,19 +480,18 @@ class SalesFlow:
             base_params.update(
                 {
                     "temperature": 0.6,
-                    "max_tokens": 120,
                     "frequency_penalty": 0.2,
                     "presence_penalty": 0.1,
                 }
             )
 
         # Настройки по этапам для SALES_AI и REAL_ESTATE
+        # max_tokens убран - используется только базовый из config.yaml
         if intent in ("SALES_AI", "REAL_ESTATE"):
             if stage == SalesStage.GREETING:
                 base_params.update(
                     {
                         "temperature": 0.5,
-                        "max_tokens": 80,
                         "frequency_penalty": 0.2,
                         "presence_penalty": 0.1,
                     }
@@ -499,7 +500,6 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.4,
-                        "max_tokens": 600,  # Увеличено с 150 до 600 для более подробных вопросов
                         "frequency_penalty": 0.3,
                         "presence_penalty": 0.2,
                     }
@@ -508,7 +508,6 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.3,
-                        "max_tokens": 2000,  # Значительно увеличено с 400 до 2000 для развернутых презентаций
                         "frequency_penalty": 0.3,
                         "presence_penalty": 0.2,
                     }
@@ -517,7 +516,6 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.35,
-                        "max_tokens": 800,  # Увеличено с 300 до 800 для развернутых ответов на возражения
                         "frequency_penalty": 0.25,
                         "presence_penalty": 0.15,
                     }
@@ -526,7 +524,6 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.4,
-                        "max_tokens": 200,
                         "frequency_penalty": 0.2,
                         "presence_penalty": 0.1,
                     }
@@ -535,7 +532,6 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.4,
-                        "max_tokens": 180,
                         "frequency_penalty": 0.2,
                         "presence_penalty": 0.1,
                     }
@@ -544,7 +540,6 @@ class SalesFlow:
                 base_params.update(
                     {
                         "temperature": 0.4,
-                        "max_tokens": 200,
                         "frequency_penalty": 0.2,
                         "presence_penalty": 0.1,
                     }

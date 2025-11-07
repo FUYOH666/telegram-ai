@@ -5,10 +5,16 @@ import sys
 from pathlib import Path
 
 # Добавляем корневую директорию в путь
-sys.path.insert(0, str(Path(__file__).parent.parent))
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-from src.telegram_ai.config import Config
-from src.telegram_ai.memory import (
+# Добавляем src в путь для импортов
+src_path = project_root / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
+from telegram_ai.config import Config
+from telegram_ai.memory import (
     Memory,
     Conversation,
     Message,
@@ -27,7 +33,7 @@ def clear_all_history(confirm: bool = False):
     Args:
         confirm: Если False, требует подтверждения перед очисткой
     """
-    config_path = Path(__file__).parent.parent / "config.yaml"
+    config_path = project_root / "config.yaml"
     config = Config.from_yaml(str(config_path))
     
     memory = Memory(

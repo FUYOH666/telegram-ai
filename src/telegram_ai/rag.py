@@ -83,6 +83,8 @@ class RAGSystem:
             return 0
 
         loaded_count = 0
+        skipped_count = 0
+        total_chunks = 0
 
         try:
             # Поддерживаем текстовые файлы (.txt, .md)
@@ -93,16 +95,24 @@ class RAGSystem:
                 if f.is_file() and f.suffix.lower() in supported_extensions
             ]
 
+            if not files:
+                logger.warning(f"No supported files (.txt, .md) found in {self.knowledge_base_path}")
+                return 0
+
             for file_path in files:
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read()
 
                     if not content.strip():
+                        logger.debug(f"Skipping empty file: {file_path.name}")
                         continue
 
                     # Разбиваем на чанки для лучшего поиска
                     chunks = self._split_into_chunks(content, chunk_size=500)
+                    total_chunks += len(chunks)
+                    file_loaded = 0
+                    file_skipped = 0
 
                     for i, chunk in enumerate(chunks):
                         doc_id = f"doc_{file_path.stem}_{i}"
@@ -113,11 +123,15 @@ class RAGSystem:
                         }
 
                         # Проверяем, не существует ли уже этот документ
-                        existing = self.rag_collection.get(ids=[doc_id])
-                        if existing and len(existing["ids"]) > 0:
-                            # Документ уже существует, пропускаем
-                            logger.debug(f"Skipping existing document: {doc_id}")
-                            continue
+                        try:
+                            existing = self.rag_collection.get(ids=[doc_id])
+                            if existing and len(existing["ids"]) > 0:
+                                # Документ уже существует, пропускаем
+                                file_skipped += 1
+                                skipped_count += 1
+                                continue
+                        except Exception as e:
+                            logger.debug(f"Error checking existing document {doc_id}: {e}")
 
                         # Получаем embedding если доступен
                         embedding = await self.vector_memory.get_embedding(chunk)
@@ -138,13 +152,43 @@ class RAGSystem:
                             )
 
                         loaded_count += 1
+                        file_loaded += 1
 
-                    logger.info(f"Loaded {len(chunks)} chunks from {file_path.name}")
+                    if file_loaded > 0:
+                        logger.info(f"Loaded {file_loaded} new chunks from {file_path.name} (skipped {file_skipped} existing)")
+                    elif file_skipped > 0:
+                        logger.debug(f"All {file_skipped} chunks from {file_path.name} already exist, skipped")
                 except Exception as e:
                     logger.error(f"Error loading file {file_path}: {e}", exc_info=True)
                     continue
 
-            logger.info(f"Knowledge base loaded: {loaded_count} chunks from {len(files)} files")
+            # Проверяем общее количество документов в коллекции
+            try:
+                collection_count = self.rag_collection.count()
+            except Exception:
+                collection_count = 0
+
+            if loaded_count > 0:
+                logger.info(
+                    f"Knowledge base loaded: {loaded_count} new chunks from {len(files)} files "
+                    f"(skipped {skipped_count} existing, total in collection: {collection_count})"
+                )
+            elif skipped_count > 0:
+                logger.info(
+                    f"Knowledge base already loaded: {skipped_count} chunks from {len(files)} files "
+                    f"already exist in collection (total: {collection_count})"
+                )
+            elif total_chunks == 0:
+                logger.warning(
+                    f"Knowledge base is empty: found {len(files)} files but no chunks extracted "
+                    "(files may be empty or contain only whitespace)"
+                )
+            else:
+                logger.warning(
+                    f"Knowledge base loading issue: {len(files)} files processed, "
+                    f"but no chunks were loaded (total chunks expected: {total_chunks})"
+                )
+
             return loaded_count
 
         except Exception as e:

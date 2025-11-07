@@ -23,7 +23,7 @@ class VoiceHandler:
         Инициализация VoiceHandler.
 
         Args:
-            base_url: Базовый URL существующего ASR сервиса (http://100.93.82.48:8001)
+            base_url: Базовый URL ASR сервиса (настраивается через ASR_SERVER_BASE_URL)
             timeout: Таймаут запроса в секундах (для длинных аудио файлов)
             enabled: Включить обработку голосовых сообщений
         """

@@ -244,11 +244,48 @@ class AIClient:
                     content = date_info + rag_context if rag_context else date_info
                     final_messages.insert(0, {"role": "system", "content": content})
 
+        # Вычисляем max_tokens динамически с учетом длины входного контекста
+        # Модель имеет max_context_length=12384, нужно оставить место для ответа
+        if max_tokens is None:
+            max_tokens = self.max_tokens
+        
+        # Приблизительно оцениваем длину входного контекста в токенах
+        # Используем очень консервативную оценку: 2 символа = 1 токен
+        # Это гарантирует что мы не превысим лимит даже если оценка занижена
+        input_text_length = sum(len(msg.get("content", "")) for msg in final_messages)
+        estimated_input_tokens = int(input_text_length / 2.0)  # 2 символа = 1 токен (очень консервативно)
+        
+        # Максимальная длина контекста модели (из ошибки: 12384)
+        max_context_length = 12384
+        # Запас безопасности (1000 токенов) - большой запас для надежности
+        safety_margin = 1000
+        
+        # Вычисляем доступное место для ответа
+        available_tokens = max_context_length - estimated_input_tokens - safety_margin
+        
+        # Используем минимум из запрошенного max_tokens и доступного места
+        if available_tokens > 200:  # Минимум 200 токенов для ответа
+            original_max_tokens = max_tokens
+            max_tokens = min(max_tokens, available_tokens)
+            if max_tokens < original_max_tokens:
+                logger.info(
+                    f"Adjusted max_tokens: requested={original_max_tokens}, "
+                    f"estimated_input={estimated_input_tokens} tokens, available={available_tokens}, "
+                    f"using={max_tokens} tokens"
+                )
+        else:
+            # Если контекст слишком большой, используем минимальный лимит
+            max_tokens = 200
+            logger.warning(
+                f"Input context too large (~{estimated_input_tokens} tokens), "
+                f"using minimal max_tokens={max_tokens}"
+            )
+        
         payload = {
             "model": self.model,
             "messages": final_messages,
             "temperature": temperature if temperature is not None else self.temperature,
-            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+            "max_tokens": max_tokens,
         }
 
         # Добавляем дополнительные параметры если указаны
@@ -271,9 +308,36 @@ class AIClient:
             if "choices" not in data or not data["choices"]:
                 raise ValueError("Invalid response format: missing choices")
 
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason", "unknown")
             request_time = time.time() - request_start_time
-            logger.debug(f"Received response in {request_time:.2f}s: {content[:100]}...")
+            
+            # Извлекаем реальное использование токенов из ответа (если доступно)
+            usage_info = ""
+            if "usage" in data:
+                usage = data["usage"]
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+                usage_info = f" (usage: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens})"
+                logger.debug(f"Token usage: prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
+            
+            # Проверяем finish_reason и логируем предупреждение если ответ был обрезан
+            if finish_reason == "length":
+                used_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+                logger.warning(
+                    f"⚠️ AI response was truncated due to max_tokens limit ({used_max_tokens}){usage_info}. "
+                    f"Response length: {len(content)} chars."
+                )
+            elif finish_reason == "stop":
+                logger.debug(f"AI response completed normally (finish_reason=stop)")
+            else:
+                logger.debug(f"AI response finish_reason: {finish_reason}")
+            
+            logger.debug(
+                f"Received response in {request_time:.2f}s (finish_reason={finish_reason}): {content[:100]}..."
+            )
 
             # Обрезаем ответ если указана максимальная длина
             if max_response_length and len(content) > max_response_length:

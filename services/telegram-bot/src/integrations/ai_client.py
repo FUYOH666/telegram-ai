@@ -40,7 +40,7 @@ class AIClient:
         Инициализация AI клиента.
 
         Args:
-            base_url: Базовый URL существующего vLLM сервера (http://100.93.82.48:8000)
+            base_url: Базовый URL vLLM или OpenAI-compatible сервера (настраивается через AI_SERVER_BASE_URL)
             model: Название модели
             api_key: API ключ (опционально)
             timeout: Таймаут запроса в секундах

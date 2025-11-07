@@ -297,10 +297,10 @@ class TelegramUserClient:
             try:
                 logger.info("Loading RAG knowledge base...")
                 loaded_count = await self.rag_system.load_knowledge_base()
-                if loaded_count > 0:
-                    logger.info(f"✅ RAG knowledge base loaded: {loaded_count} chunks")
-                else:
-                    logger.warning("RAG knowledge base is empty or not found")
+                # Сообщение уже логируется в load_knowledge_base с детальной информацией
+                if loaded_count == 0:
+                    # Это не обязательно ошибка - документы могут быть уже загружены
+                    logger.debug("No new chunks loaded (may already exist in collection)")
             except Exception as e:
                 logger.warning(f"Failed to load RAG knowledge base: {e}", exc_info=True)
 
@@ -481,7 +481,7 @@ class TelegramUserClient:
                             # Транскрибируем с учетом языка пользователя
                             transcribed_text = (
                                 await self.voice_handler.transcribe_voice(
-                                    audio_path, language=asr_language
+                                    audio_path, language=asr_language, duration=audio_duration
                                 )
                             )
                             transcription_time = time.time() - transcription_start
@@ -491,6 +491,10 @@ class TelegramUserClient:
 
                             # Используем транскрипт как текст сообщения
                             message_text = transcribed_text
+                            logger.info(
+                                f"✅ Voice transcription completed, message_text set: "
+                                f"{len(message_text)} chars, continuing with AI processing..."
+                            )
 
                             # Удаляем временный файл
                             try:
@@ -929,36 +933,11 @@ class TelegramUserClient:
                         pass
 
                 # Работа со скриптом продаж
-                max_response_length = None
                 current_stage = None
 
                 if self.sales_flow and self.sales_flow.enabled:
                     current_stage = self.sales_flow.get_stage(user_context_data)
-
-                    # Устанавливаем флаг introduced если это первое сообщение или этап GREETING
-                    if not is_introduced and (
-                        is_first_message or current_stage == SalesStage.GREETING
-                    ):
-                        if user_context_data:
-                            try:
-                                context_dict = json.loads(user_context_data)
-                                context_dict["introduced"] = True
-                                user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(
-                                    sender.id, user_context_data
-                                )
-                            except (json.JSONDecodeError, ValueError):
-                                # Создаем новый контекст с флагом
-                                context_dict = {"introduced": True}
-                                user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(
-                                    sender.id, user_context_data
-                                )
-                        else:
-                            # Создаем новый контекст с флагом
-                            user_context_data = json.dumps({"introduced": True})
-                            self.memory.save_user_context(sender.id, user_context_data)
-                        is_introduced = True
+                    # Флаг introduced будет установлен ПОСЛЕ генерации ответа, чтобы промпт видел первое знакомство
                 else:
                     # Если sales_flow отключен, устанавливаем флаг при первом сообщении
                     if not is_introduced and is_first_message:
@@ -1411,17 +1390,7 @@ class TelegramUserClient:
                                 f"Используй этот вопрос естественно в диалоге, но не навязывай."
                             )
 
-                # Получаем максимальную длину ответа для текущего этапа
-                if (
-                    self.sales_flow
-                    and self.sales_flow.enabled
-                    and current_stage is not None
-                ):
-                    max_response_length = self.sales_flow.get_stage_max_length(
-                        current_stage
-                    )
-                else:
-                    max_response_length = None
+                # max_response_length убран - единственный лимит это лимит Telegram (4096 символов)
 
                 # Модифицируем системный промпт для текущего этапа
                 if (
@@ -1444,12 +1413,8 @@ class TelegramUserClient:
                     introduction_instruction = "\n\n⚠️ ВАЖНО: Это первое знакомство с пользователем. Представься как Александр из Scanovich.ai при приветствии."
 
                 # Формируем инструкции (будет добавлено ПОСЛЕ основного промпта)
-                length_info = ""
-                if max_response_length:
-                    length_info = f"\n\nМАКСИМАЛЬНАЯ ДЛИНА ОТВЕТА: {max_response_length} символов. Строго соблюдай это ограничение."
-                else:
-                    # Если лимита нет, напоминаем что можно писать развернуто, система сама разобьет на части
-                    length_info = "\n\nВАЖНО: Отвечай ПОЛНОСТЬЮ и развернуто, не обрезай ответ. Если ответ превысит 4096 символов, система автоматически разобьет его на несколько сообщений. НЕ добавляй многоточие и НЕ обрезай ответ самостоятельно."
+                # Единственный лимит - лимит Telegram (4096 символов), который обрабатывается автоматически
+                length_info = "\n\nВАЖНО: Отвечай ПОЛНОСТЬЮ и развернуто, не обрезай ответ. Если ответ превысит 4096 символов, система автоматически разобьет его на несколько сообщений. НЕ добавляй многоточие и НЕ обрезай ответ самостоятельно."
 
                 # ВАЖНО: Добавляем инструкцию о языке ВСЕГДА на основе последнего сообщения
                 language_instruction = ""
@@ -1601,20 +1566,27 @@ class TelegramUserClient:
                 # Генерируем ответ через AI
                 try:
                     ai_request_start = time.time()
-                    logger.info(f"🤖 Sending {len(context)} messages to AI server...")
+                    logger.info(
+                        f"🤖 Sending {len(context)} messages to AI server for message_text: "
+                        f"{message_text[:100] if message_text else '(empty)'}..."
+                    )
+                    used_max_tokens = generation_params.get("max_tokens") or self.config.ai_server.max_tokens
+                    # max_tokens берется из generation_params если указан, иначе из config.yaml (8192)
+                    # max_response_length убран - единственный лимит это лимит Telegram (4096 символов)
                     response = await self.ai_client.get_response(
                         context,
-                        max_response_length=max_response_length,
                         temperature=generation_params.get("temperature"),
-                        max_tokens=generation_params.get("max_tokens"),
+                        max_tokens=generation_params.get("max_tokens"),  # Если None, используется из config.yaml
                         top_p=generation_params.get("top_p"),
                         frequency_penalty=generation_params.get("frequency_penalty"),
                         presence_penalty=generation_params.get("presence_penalty"),
                         rag_system=self.rag_system,
                     )
                     ai_request_time = time.time() - ai_request_start
+                    stage_info = f", stage={current_stage.value}" if current_stage else ""
                     logger.info(
-                        f"✅ AI response received in {ai_request_time:.2f}s ({len(response)} chars): {response[:150]}..."
+                        f"✅ AI response received in {ai_request_time:.2f}s ({len(response)} chars, "
+                        f"max_tokens={used_max_tokens}{stage_info}): {response[:150]}..."
                     )
                     logger.debug(f"Full AI response: {response}")
 
@@ -1764,6 +1736,31 @@ class TelegramUserClient:
                                     return
                         except (json.JSONDecodeError, ValueError):
                             pass
+
+                    # Устанавливаем флаг introduced ПОСЛЕ генерации ответа (чтобы промпт видел первое знакомство)
+                    if not is_introduced and (
+                        is_first_message or (current_stage and current_stage == SalesStage.GREETING)
+                    ):
+                        if user_context_data:
+                            try:
+                                context_dict = json.loads(user_context_data)
+                                context_dict["introduced"] = True
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
+                            except (json.JSONDecodeError, ValueError):
+                                # Создаем новый контекст с флагом
+                                context_dict = {"introduced": True}
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
+                        else:
+                            # Создаем новый контекст с флагом
+                            user_context_data = json.dumps({"introduced": True})
+                            self.memory.save_user_context(sender.id, user_context_data)
+                        logger.debug(f"Flag 'introduced' set to True for user {sender.id}")
 
                     # Отправляем ответ
                     await self.safe_reply(event, response)
@@ -2354,8 +2351,27 @@ class TelegramUserClient:
                         f"HTTP error from AI server: {e.response.status_code} - {e.response.text}",
                         exc_info=True,
                     )
+                    # Пытаемся извлечь детали ошибки из ответа
+                    error_detail = ""
+                    try:
+                        if e.response is not None:
+                            error_json = e.response.json()
+                            if "error" in error_json:
+                                error_detail = error_json["error"].get("message", "")
+                    except Exception:
+                        error_detail = str(e.response.text) if e.response else ""
+                    
                     if e.response.status_code == 404:
                         user_error = "❌ Ошибка подключения к AI серверу. Проверьте настройки (URL и модель)."
+                    elif e.response.status_code == 400:
+                        # Ошибка 400 обычно связана с превышением max_tokens или неверным форматом
+                        if "max_tokens" in error_detail.lower() or "max_completion_tokens" in error_detail.lower():
+                            user_error = (
+                                "⚠️ Контекст сообщения слишком большой для обработки. "
+                                "Попробуйте сократить сообщение или разбить его на части."
+                            )
+                        else:
+                            user_error = f"❌ Ошибка запроса к AI серверу: {error_detail[:200] if error_detail else 'неверный формат запроса'}"
                     elif e.response.status_code >= 500:
                         user_error = (
                             "🔧 Ошибка на стороне AI сервера. Попробуйте позже."
