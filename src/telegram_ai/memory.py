@@ -1,9 +1,10 @@
 """Управление памятью и контекстом диалогов в SQLite БД."""
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import (
     Column,
@@ -666,6 +667,173 @@ class Memory:
             logger.debug(f"Saved user context for user_id={user_id}")
         finally:
             session.close()
+
+    def update_slot_with_confidence(
+        self,
+        user_id: int,
+        field: str,
+        value: Any,
+        confidence: float,
+        source: str = "llm",
+    ) -> None:
+        """
+        Обновить слот с уверенностью в контексте пользователя.
+
+        Args:
+            user_id: ID пользователя Telegram
+            field: Название слота
+            value: Значение слота
+            confidence: Уверенность от 0.0 до 1.0
+            source: Источник данных ("llm", "explicit", "inferred")
+        """
+        context_data = self.get_user_context(user_id)
+        if context_data:
+            try:
+                data = json.loads(context_data)
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+        else:
+            data = {}
+
+        if "slots" not in data:
+            data["slots"] = {}
+
+        # Храним слоты в новом формате с confidence
+        data["slots"][field] = {
+            "value": value,
+            "source": source,
+            "confidence": max(0.0, min(1.0, confidence)),  # Ограничиваем в [0.0, 1.0]
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        self.save_user_context(user_id, json.dumps(data))
+        logger.debug(
+            f"Updated slot '{field}' with confidence {confidence:.2f} for user_id={user_id}"
+        )
+
+    def get_slots_with_confidence(self, user_id: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Получить слоты с уверенностью из контекста пользователя.
+
+        Args:
+            user_id: ID пользователя Telegram
+
+        Returns:
+            Словарь слотов в формате:
+            {
+                "field": {
+                    "value": "...",
+                    "source": "llm",
+                    "confidence": 0.9,
+                    "updated_at": "..."
+                },
+                ...
+            }
+        """
+        context_data = self.get_user_context(user_id)
+        if not context_data:
+            return {}
+
+        try:
+            data = json.loads(context_data)
+            slots = data.get("slots", {})
+
+            # Поддерживаем оба формата: новый (с confidence) и старый (просто value)
+            result = {}
+            for field, slot_data in slots.items():
+                if isinstance(slot_data, dict) and "value" in slot_data:
+                    # Новый формат
+                    result[field] = slot_data
+                else:
+                    # Старый формат - преобразуем в новый
+                    result[field] = {
+                        "value": slot_data,
+                        "source": "legacy",
+                        "confidence": 0.7,  # Средняя уверенность для старых данных
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+
+            return result
+        except (json.JSONDecodeError, ValueError):
+            return {}
+
+    def get_user_timezone(self, user_id: int) -> Optional[str]:
+        """
+        Получить часовой пояс пользователя из контекста.
+
+        Args:
+            user_id: ID пользователя Telegram
+
+        Returns:
+            Название часового пояса (например, "Europe/Moscow") или None
+        """
+        context_data = self.get_user_context(user_id)
+        if not context_data:
+            return None
+
+        try:
+            data = json.loads(context_data)
+            profile = data.get("profile", {})
+            return profile.get("timezone")
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    def get_user_consents(self, user_id: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Получить согласия пользователя из контекста.
+
+        Args:
+            user_id: ID пользователя Telegram
+
+        Returns:
+            Словарь согласий:
+            {
+                "pdpa_profile": {"granted": True, "timestamp": "..."},
+                "calendar_invite": {"granted": True, "timestamp": "..."}
+            }
+        """
+        context_data = self.get_user_context(user_id)
+        if not context_data:
+            return {}
+
+        try:
+            data = json.loads(context_data)
+            return data.get("consents", {})
+        except (json.JSONDecodeError, ValueError):
+            return {}
+
+    def save_user_consent(
+        self, user_id: int, consent_type: str, granted: bool
+    ) -> None:
+        """
+        Сохранить согласие пользователя.
+
+        Args:
+            user_id: ID пользователя Telegram
+            consent_type: Тип согласия ("pdpa_profile", "calendar_invite")
+            granted: Предоставлено ли согласие
+        """
+        context_data = self.get_user_context(user_id)
+        if context_data:
+            try:
+                data = json.loads(context_data)
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+        else:
+            data = {}
+
+        if "consents" not in data:
+            data["consents"] = {}
+
+        data["consents"][consent_type] = {
+            "granted": granted,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        self.save_user_context(user_id, json.dumps(data))
+        logger.info(
+            f"Saved consent '{consent_type}'={granted} for user_id={user_id}"
+        )
 
     def delete_user_data(self, user_id: int) -> Dict[str, int]:
         """

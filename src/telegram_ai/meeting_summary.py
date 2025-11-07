@@ -116,6 +116,55 @@ class MeetingSummary:
         logger.info(f"Generated meeting summary: {len(summary_parts)} sections")
         return summary_text
 
+    def generate_mini_agenda(self, slots: Dict[str, Any], fit_score: int) -> str:
+        """
+        Сформировать мини-повестку встречи на основе собранных слотов и fit_score.
+
+        Args:
+            slots: Словарь с заполненными слотами
+            fit_score: Fit score (0-100)
+
+        Returns:
+            Текстовая мини-повестка встречи
+        """
+        agenda_parts = []
+        
+        # Заголовок
+        agenda_parts.append("📋 Повестка встречи:")
+        
+        # Основные темы на основе собранных слотов
+        if slots.get("main_problems"):
+            agenda_parts.append(f"• Обсуждение проблемы: {slots['main_problems']}")
+        
+        if slots.get("goal"):
+            agenda_parts.append(f"• Цель проекта: {slots['goal']}")
+        
+        if slots.get("process_volume") or slots.get("error_rate"):
+            metrics = []
+            if slots.get("process_volume"):
+                metrics.append(f"объем: {slots['process_volume']}")
+            if slots.get("error_rate"):
+                metrics.append(f"ошибки: {slots['error_rate']}")
+            if metrics:
+                agenda_parts.append(f"• Метрики: {', '.join(metrics)}")
+        
+        if slots.get("budget_band"):
+            agenda_parts.append(f"• Бюджет: {slots['budget_band']}")
+        
+        if slots.get("deadline"):
+            agenda_parts.append(f"• Сроки: {slots['deadline']}")
+        
+        # Fit score для контекста
+        if fit_score < 60:
+            agenda_parts.append(f"\n⚠️ Fit score: {fit_score}/100 (ниже порога 60)")
+            agenda_parts.append("Рекомендуется уточнить недостающую информацию на встрече.")
+        else:
+            agenda_parts.append(f"\n✅ Fit score: {fit_score}/100")
+        
+        agenda_text = "\n".join(agenda_parts)
+        logger.info(f"Generated mini agenda with fit_score={fit_score}")
+        return agenda_text
+
     def generate_json_summary(self, slots: Dict[str, Any]) -> Dict[str, Any]:
         """
         Сформировать JSON структуру сводки для автоматической обработки.
@@ -592,6 +641,12 @@ class MeetingSummary:
         if problems_list:
             problems_text = ", ".join(problems_list[:3])  # Максимум 3
             report_parts.append(f"— Основные проблемы: {problems_text}")
+        
+        # Fit score (если доступен)
+        if "fit_score" in slots or hasattr(self, "_last_fit_score"):
+            fit_score = slots.get("fit_score") or getattr(self, "_last_fit_score", None)
+            if fit_score is not None:
+                report_parts.append(f"— Fit score: {fit_score}/100")
 
         # Тон общения
         if conversation_history:
@@ -624,6 +679,16 @@ class MeetingSummary:
                 report_parts.append("— Рекомендации для встречи:")
                 for rec in recommendations:
                     report_parts.append(f"  • {rec}")
+        
+        # Проверка согласия на создание встречи
+        if "consents" in slots or hasattr(self, "_check_consent"):
+            # Если есть информация о согласиях, проверяем calendar_invite
+            consents = slots.get("consents", {})
+            if isinstance(consents, dict):
+                calendar_consent = consents.get("calendar_invite", {})
+                if isinstance(calendar_consent, dict) and not calendar_consent.get("granted", False):
+                    report_parts.append("\n⚠️ Согласие на создание встречи не получено")
+                    return "\n".join(report_parts)
 
         return "\n".join(report_parts)
 

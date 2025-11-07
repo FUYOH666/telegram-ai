@@ -1,0 +1,1 @@
+"""Интеграции Telegram Bot Service."""

@@ -1,6 +1,3 @@
-# Environment variables
-.env
-
 # Python
 __pycache__/
 *.py[cod]
@@ -24,12 +21,12 @@ wheels/
 *.egg
 
 # Virtual environments
-.venv/
 venv/
-ENV/
 env/
+ENV/
+.venv
 
-# IDE
+# IDEs
 .vscode/
 .idea/
 .cursor/
@@ -37,32 +34,56 @@ env/
 *.swo
 *~
 
-# Telethon sessions (секреты!)
+# Environment variables
+.env
+.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+data/
+!data/.gitkeep
+
+# Sessions and credentials
 sessions/
+credentials/
 *.session
 *.session-journal
 
-# Credentials (секреты!)
-credentials/
-*.json
-!credentials/.gitkeep
-
-# Database
-data/
-*.db
-*.db-journal
-
 # Logs
-*.log
 logs/
-!logs/.gitkeep
+*.log
 
 # Temporary files
 temp_audio/
+*.ogg
+*.wav
+*.mp3
 
 # OS
 .DS_Store
 Thumbs.db
 
+# Alembic
+alembic/versions/*.pyc
+
+# Docker
+.dockerignore
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
 # uv
-# uv.lock - НЕ игнорируем! Это источник истины для зависимостей (P0)
+.uv/
+uv.lock.bak

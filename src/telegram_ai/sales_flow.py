@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -158,17 +159,32 @@ class SalesFlow:
         "встретиться",
     ]
 
-    def __init__(self, enabled: bool = True, slot_extractor=None):
+    def __init__(self, enabled: bool = True, slot_extractor=None, event_bus=None):
         """
         Инициализация SalesFlow.
 
         Args:
             enabled: Включить скрипт продаж
             slot_extractor: Экземпляр SlotExtractor для автоматического извлечения слотов
+            event_bus: Экземпляр EventBus для публикации событий (опционально)
         """
         self.enabled = enabled
         self.slot_extractor = slot_extractor
-        logger.info(f"SalesFlow initialized: enabled={enabled}")
+        self.event_bus = event_bus
+        
+        # Подписываемся на события если event_bus доступен
+        if self.event_bus:
+            from .events import (
+                EVENT_SLOT_FOUND,
+                EVENT_SLOT_CORRECTION,
+                EVENT_INTENT_CHANGED,
+            )
+            
+            self.event_bus.subscribe(EVENT_SLOT_FOUND, self._handle_slot_found)
+            self.event_bus.subscribe(EVENT_SLOT_CORRECTION, self._handle_slot_correction)
+            self.event_bus.subscribe(EVENT_INTENT_CHANGED, self._handle_intent_changed)
+        
+        logger.info(f"SalesFlow initialized: enabled={enabled}, event_bus={'enabled' if event_bus else 'disabled'}")
 
     def get_stage(self, context_data: Optional[str]) -> SalesStage:
         """
@@ -335,10 +351,17 @@ class SalesFlow:
                 "- Собирай информацию естественно в процессе диалога: сначала базовые данные (имя, компания), потом о бизнесе (проблемы, метрики), затем о проекте\n"
                 "- Если клиент не готов делиться некоторой информацией (например, финансовыми показателями) — не дави, но объясни, что это поможет лучше понять масштаб задачи\n"
                 "- Отвечай ПОЛНОСТЬЮ и развернуто, раскрывай все аспекты, не обрезай ответ\n\n"
+                "Правила уточнения при низкой уверенности:\n"
+                "- Если уверенность в извлеченной информации < 0.6 — задай один короткий уточняющий вопрос\n"
+                "- Если уверенность 0.6-0.8 — мягко подтверди ('Верно ли, что...?' или 'Правильно ли я понял, что...?')\n"
+                "- Если уверенность ≥ 0.8 — используй информацию без уточнений\n"
+                "- Не задавай несколько уточняющих вопросов подряд — один вопрос за раз\n\n"
                 "Примеры естественных реакций:\n"
                 "- 'Окей, понял. А расскажи, какая у вас сейчас ситуация с [проблема]?'\n"
                 "- 'Понимаю, это боль многих компаний. Что чаще всего вызывает [проблема]?'\n"
-                "- 'Спасибо за информацию! А можешь поделиться примерным оборотом компании? Это поможет лучше понять масштаб задачи.'\n\n"
+                "- 'Спасибо за информацию! А можешь поделиться примерным оборотом компании? Это поможет лучше понять масштаб задачи.'\n"
+                "- 'Верно ли, что у вас около 50 сотрудников?' (мягкое подтверждение)\n"
+                "- 'Уточни, пожалуйста, какая именно задача отнимает больше всего времени?' (уточнение при низкой уверенности)\n\n"
                 "ВАЖНО: Отвечай развернуто, раскрывай все детали, не обрезай ответ многоточием."
             ),
             SalesStage.PRESENTATION: (
@@ -537,16 +560,120 @@ class SalesFlow:
             context_data: JSON строка с контекстом пользователя
 
         Returns:
-            Словарь заполненных слотов
+            Словарь заполненных слотов (старый формат для обратной совместимости)
         """
         if not context_data:
             return {}
 
         try:
             data = json.loads(context_data)
-            return data.get("slots", {})
+            slots = data.get("slots", {})
+            
+            # Преобразуем новый формат (с confidence) в старый (просто value)
+            result = {}
+            for field, slot_data in slots.items():
+                if isinstance(slot_data, dict) and "value" in slot_data:
+                    result[field] = slot_data["value"]
+                else:
+                    result[field] = slot_data
+            
+            return result
         except (json.JSONDecodeError, ValueError):
             return {}
+
+    def get_slots_with_confidence(self, context_data: Optional[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Получить заполненные слоты с уверенностью из контекста.
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+
+        Returns:
+            Словарь слотов в формате:
+            {
+                "field": {
+                    "value": "...",
+                    "source": "llm",
+                    "confidence": 0.9,
+                    "updated_at": "..."
+                },
+                ...
+            }
+        """
+        if not context_data:
+            return {}
+
+        try:
+            data = json.loads(context_data)
+            slots = data.get("slots", {})
+            
+            # Поддерживаем оба формата
+            result = {}
+            for field, slot_data in slots.items():
+                if isinstance(slot_data, dict) and "value" in slot_data:
+                    result[field] = slot_data
+                else:
+                    # Старый формат - преобразуем в новый
+                    result[field] = {
+                        "value": slot_data,
+                        "source": "legacy",
+                        "confidence": 0.7,
+                        "updated_at": datetime.now().isoformat(),
+                    }
+            
+            return result
+        except (json.JSONDecodeError, ValueError):
+            return {}
+
+    def get_low_confidence_slots(
+        self, context_data: Optional[str], threshold: float = 0.6
+    ) -> List[str]:
+        """
+        Получить список слотов с низкой уверенностью.
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+            threshold: Порог уверенности (по умолчанию 0.6)
+
+        Returns:
+            Список названий слотов с confidence < threshold
+        """
+        slots_with_conf = self.get_slots_with_confidence(context_data)
+        low_confidence = []
+        
+        for field, slot_data in slots_with_conf.items():
+            confidence = slot_data.get("confidence", 0.7)
+            if confidence < threshold:
+                low_confidence.append(field)
+        
+        return low_confidence
+
+    def get_medium_confidence_slots(
+        self,
+        context_data: Optional[str],
+        threshold_min: float = 0.6,
+        threshold_max: float = 0.8,
+    ) -> List[str]:
+        """
+        Получить список слотов со средней уверенностью (для мягкого подтверждения).
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+            threshold_min: Минимальный порог уверенности (по умолчанию 0.6)
+            threshold_max: Максимальный порог уверенности (по умолчанию 0.8)
+
+        Returns:
+            Список названий слотов с confidence в диапазоне [threshold_min, threshold_max)
+        """
+        slots_with_conf = self.get_slots_with_confidence(context_data)
+        medium_confidence = []
+        
+        for field, slot_data in slots_with_conf.items():
+            confidence = slot_data.get("confidence", 0.7)
+            if threshold_min <= confidence < threshold_max:
+                medium_confidence.append(field)
+        
+        return medium_confidence
 
     async def auto_extract_slots(
         self, message: str, context_data: Optional[str], intent: Optional[str] = None
@@ -581,12 +708,12 @@ class SalesFlow:
             # Все слоты уже заполнены
             return context_data or "{}"
 
-        # Извлекаем слоты из сообщения
-        extracted_slots = await self.slot_extractor.extract_slots(
+        # Извлекаем слоты из сообщения (новый формат с confidence)
+        extracted_slots_list = await self.slot_extractor.extract_slots(
             message, intent, missing_slots
         )
 
-        if not extracted_slots:
+        if not extracted_slots_list:
             # Не удалось извлечь слоты
             return context_data or "{}"
 
@@ -603,10 +730,20 @@ class SalesFlow:
             data["slots"] = {}
 
         # Обновляем только те слоты, которые были извлечены
-        for slot_name, slot_value in extracted_slots.items():
-            if slot_name in missing_slots:  # Проверяем что слот действительно был нужен
-                data["slots"][slot_name] = slot_value
-                logger.info(f"Auto-extracted slot '{slot_name}': {slot_value}")
+        for slot_info in extracted_slots_list:
+            slot_name = slot_info.get("field")
+            if slot_name and slot_name in missing_slots:
+                # Сохраняем в новом формате с confidence
+                data["slots"][slot_name] = {
+                    "value": slot_info.get("value"),
+                    "source": slot_info.get("source", "llm"),
+                    "confidence": slot_info.get("confidence", 0.7),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                logger.info(
+                    f"Auto-extracted slot '{slot_name}': {slot_info.get('value')} "
+                    f"(confidence={slot_info.get('confidence', 0.7):.2f})"
+                )
 
         # Обратная совместимость: если заполнен domain, но нет company_domain, копируем
         if "domain" in data.get("slots", {}) and "company_domain" not in data.get(
@@ -850,25 +987,131 @@ class SalesFlow:
         missing_slots = self.get_missing_slots(context_data, intent)
         return len(missing_slots) == 0
 
+    # Порог fit_score для предложения встречи
+    FIT_SCORE_THRESHOLD = 60
+
+    def compute_fit_score(self, context_data: Optional[str]) -> int:
+        """
+        Вычислить fit_score (0-100) на основе заполненных слотов.
+
+        Формула:
+        - Признанная проблема (main_problems заполнено): +20
+        - Измеримый объём/ошибка (process_volume или error_rate заполнено): +20
+        - Доступ к данным (data_access заполнено): +15
+        - Лицо, принимающее решение (client_name + company_name заполнено): +15
+        - Бюджет/вилка (budget_band заполнено): +20
+        - Сроки (deadline заполнено): +10
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+
+        Returns:
+            Fit score от 0 до 100
+        """
+        slots = self.get_slots(context_data)
+        score = 0
+
+        # Признанная проблема
+        if slots.get("main_problems"):
+            score += 20
+
+        # Измеримый объём/ошибка
+        if slots.get("process_volume") or slots.get("error_rate"):
+            score += 20
+
+        # Доступ к данным
+        if slots.get("data_access"):
+            score += 15
+
+        # Лицо, принимающее решение
+        if slots.get("client_name") and slots.get("company_name"):
+            score += 15
+
+        # Бюджет/вилка
+        if slots.get("budget_band"):
+            score += 20
+
+        # Сроки
+        if slots.get("deadline"):
+            score += 10
+
+        return min(100, score)  # Ограничиваем максимум 100
+
+    def get_fit_score_breakdown(self, context_data: Optional[str]) -> Dict[str, Any]:
+        """
+        Получить детальную разбивку fit_score для логирования/отладки.
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+
+        Returns:
+            Словарь с разбивкой:
+            {
+                "total_score": 65,
+                "components": {
+                    "problem": 20,
+                    "metrics": 20,
+                    "data_access": 15,
+                    "decision_maker": 15,
+                    "budget": 20,
+                    "deadline": 0
+                },
+                "threshold": 60,
+                "meets_threshold": True
+            }
+        """
+        slots = self.get_slots(context_data)
+        components = {}
+
+        # Признанная проблема
+        components["problem"] = 20 if slots.get("main_problems") else 0
+
+        # Измеримый объём/ошибка
+        components["metrics"] = 20 if (slots.get("process_volume") or slots.get("error_rate")) else 0
+
+        # Доступ к данным
+        components["data_access"] = 15 if slots.get("data_access") else 0
+
+        # Лицо, принимающее решение
+        components["decision_maker"] = 15 if (slots.get("client_name") and slots.get("company_name")) else 0
+
+        # Бюджет/вилка
+        components["budget"] = 20 if slots.get("budget_band") else 0
+
+        # Сроки
+        components["deadline"] = 10 if slots.get("deadline") else 0
+
+        total_score = sum(components.values())
+
+        return {
+            "total_score": total_score,
+            "components": components,
+            "threshold": self.FIT_SCORE_THRESHOLD,
+            "meets_threshold": total_score >= self.FIT_SCORE_THRESHOLD,
+        }
+
     def should_offer_consultation(
         self,
         context_data: Optional[str],
         intent: Optional[str] = None,
         presentation_messages_count: int = 0,
         is_ready_for_meeting: bool = False,
+        explicit_request: bool = False,
     ) -> bool:
         """
         Проверить, нужно ли автоматически предложить консультацию.
 
         Предложение встречи происходит если:
-        - Собрано достаточно информации для встречи (is_ready_for_meeting = True)
-        - ИЛИ было 2-3 сообщения на этапе PRESENTATION (признак интереса клиента)
+        - fit_score >= FIT_SCORE_THRESHOLD (60) ИЛИ есть явный запрос созвона
+        - И текущий этап PRESENTATION
+        - И собрано достаточно информации или было 2+ сообщений на PRESENTATION
 
         Args:
             context_data: JSON строка с контекстом пользователя
             intent: Тип намерения ("SALES_AI" или "REAL_ESTATE")
             presentation_messages_count: Количество сообщений на этапе PRESENTATION
             is_ready_for_meeting: True если собрано достаточно информации для встречи
+            explicit_request: True если пользователь явно запросил встречу/созвон
 
         Returns:
             True если нужно предложить консультацию
@@ -881,17 +1124,64 @@ class SalesFlow:
         if current_stage != SalesStage.PRESENTATION:
             return False
 
+        # Вычисляем fit_score
+        fit_score = self.compute_fit_score(context_data)
+        meets_fit_threshold = fit_score >= self.FIT_SCORE_THRESHOLD
+
         # Предлагаем встречу если:
-        # 1. Собрано достаточно информации
-        # 2. ИЛИ было 2+ сообщений на этапе PRESENTATION (признак интереса)
-        if is_ready_for_meeting:
-            logger.info("Should offer consultation: enough information collected")
-            return True
+        # 1. fit_score >= 60 ИЛИ есть явный запрос
+        # 2. И (собрано достаточно информации ИЛИ было 2+ сообщений на PRESENTATION)
+        should_offer = (meets_fit_threshold or explicit_request) and (
+            is_ready_for_meeting or presentation_messages_count >= 2
+        )
 
-        if presentation_messages_count >= 2:
+        if should_offer:
+            breakdown = self.get_fit_score_breakdown(context_data)
             logger.info(
-                f"Should offer consultation: {presentation_messages_count} messages on PRESENTATION stage"
+                f"Should offer consultation: fit_score={fit_score} "
+                f"(threshold={self.FIT_SCORE_THRESHOLD}, explicit_request={explicit_request}, "
+                f"breakdown={breakdown['components']})"
             )
-            return True
 
-        return False
+        return should_offer
+
+    def _handle_slot_found(self, event) -> None:
+        """
+        Обработчик события SLOT_FOUND.
+
+        Args:
+            event: Событие с информацией о найденном слоте
+        """
+        payload = event.payload
+        field = payload.get("field")
+        confidence = payload.get("confidence", 0.7)
+        
+        logger.debug(f"Handling SLOT_FOUND event: field={field}, confidence={confidence:.2f}")
+        
+        # Можно добавить дополнительную логику обработки здесь
+        # Например, обновление missing_slots или проверка переходов
+
+    def _handle_slot_correction(self, event) -> None:
+        """
+        Обработчик события SLOT_CORRECTION.
+
+        Args:
+            event: Событие с информацией об исправленном слоте
+        """
+        payload = event.payload
+        field = payload.get("field")
+        new_confidence = payload.get("confidence", 0.7)
+        
+        logger.debug(f"Handling SLOT_CORRECTION event: field={field}, new_confidence={new_confidence:.2f}")
+
+    def _handle_intent_changed(self, event) -> None:
+        """
+        Обработчик события INTENT_CHANGED.
+
+        Args:
+            event: Событие с информацией об изменении намерения
+        """
+        payload = event.payload
+        new_intent = payload.get("intent")
+        
+        logger.debug(f"Handling INTENT_CHANGED event: new_intent={new_intent}")

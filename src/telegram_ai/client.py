@@ -27,6 +27,8 @@ from .meeting_summary import MeetingSummary
 from .memory import Memory
 from .rag import RAGSystem
 from .rate_limiter import GlobalRateLimiter, RateLimiter
+from .consent import ConsentManager
+from .events import Event, EventBus, EVENT_NEW_MESSAGE, EVENT_SLOT_FOUND, EVENT_TIME_PROPOSED, EVENT_CONSENT_GIVEN, EVENT_CONFLICT_FOUND, EVENT_INTENT_CHANGED
 from .sales_flow import SalesFlow, SalesStage
 from .slot_extractor import SlotExtractor
 from .tools import Tools
@@ -62,6 +64,7 @@ class TelegramUserClient:
         self.vector_memory: Optional[VectorMemory] = None
         self.rag_system: Optional[RAGSystem] = None
         self.meeting_summary: Optional[MeetingSummary] = None
+        self.consent_manager: Optional[ConsentManager] = None
 
         # Инициализируем компоненты
         self._init_components()
@@ -184,17 +187,27 @@ class TelegramUserClient:
         else:
             self.slot_extractor = None
 
+        # EventBus для событийной системы
+        from .events import EventBus
+        self.event_bus = EventBus()
+        logger.info("EventBus initialized")
+
         # Sales Flow (если включен)
         if self.config.sales_flow.enabled:
             self.sales_flow = SalesFlow(
                 enabled=self.config.sales_flow.enabled,
                 slot_extractor=self.slot_extractor,
+                event_bus=self.event_bus,
             )
             logger.info("SalesFlow initialized")
 
         # Meeting Summary (всегда инициализируем для генерации сводок)
         self.meeting_summary = MeetingSummary()
         logger.info("MeetingSummary initialized")
+
+        # Consent Manager (для PDPA и других согласий)
+        self.consent_manager = ConsentManager(memory=self.memory)
+        logger.info("ConsentManager initialized")
 
         # Intent Classifier (всегда включен)
         self.intent_classifier = IntentClassifier(
@@ -686,6 +699,20 @@ class TelegramUserClient:
                         self.memory.save_user_context(sender.id, new_context)
 
                 if message_text:
+                    # Публикуем событие NEW_MESSAGE
+                    if self.event_bus:
+                        self.event_bus.publish(
+                            Event(
+                                name=EVENT_NEW_MESSAGE,
+                                payload={
+                                    "user_id": sender.id,
+                                    "message": message_text,
+                                    "username": username,
+                                },
+                                timestamp=time.time(),
+                            )
+                        )
+
                     # Записываем сообщение в rate limiter после успешной проверки
                     self.rate_limiter.record_message(sender.id, message_text)
 
@@ -849,6 +876,21 @@ class TelegramUserClient:
                                 f"Intent detected: {current_intent} -> {detected_intent.value} "
                                 f"(confidence={confidence:.2f})"
                             )
+                            
+                            # Публикуем событие INTENT_CHANGED
+                            if self.event_bus:
+                                self.event_bus.publish(
+                                    Event(
+                                        name=EVENT_INTENT_CHANGED,
+                                        payload={
+                                            "old_intent": current_intent,
+                                            "new_intent": detected_intent.value,
+                                            "confidence": confidence,
+                                            "user_id": sender.id,
+                                        },
+                                        timestamp=time.time(),
+                                    )
+                                )
 
                         # Обновляем intent в контексте
                         if self.sales_flow and self.sales_flow.enabled:
@@ -894,18 +936,24 @@ class TelegramUserClient:
                     current_stage = self.sales_flow.get_stage(user_context_data)
 
                     # Устанавливаем флаг introduced если это первое сообщение или этап GREETING
-                    if not is_introduced and (is_first_message or current_stage == SalesStage.GREETING):
+                    if not is_introduced and (
+                        is_first_message or current_stage == SalesStage.GREETING
+                    ):
                         if user_context_data:
                             try:
                                 context_dict = json.loads(user_context_data)
                                 context_dict["introduced"] = True
                                 user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(sender.id, user_context_data)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
                             except (json.JSONDecodeError, ValueError):
                                 # Создаем новый контекст с флагом
                                 context_dict = {"introduced": True}
                                 user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(sender.id, user_context_data)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
                         else:
                             # Создаем новый контекст с флагом
                             user_context_data = json.dumps({"introduced": True})
@@ -919,12 +967,16 @@ class TelegramUserClient:
                                 context_dict = json.loads(user_context_data)
                                 context_dict["introduced"] = True
                                 user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(sender.id, user_context_data)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
                             except (json.JSONDecodeError, ValueError):
                                 # Создаем новый контекст с флагом
                                 context_dict = {"introduced": True}
                                 user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(sender.id, user_context_data)
+                                self.memory.save_user_context(
+                                    sender.id, user_context_data
+                                )
                         else:
                             # Создаем новый контекст с флагом
                             user_context_data = json.dumps({"introduced": True})
@@ -1093,14 +1145,172 @@ class TelegramUserClient:
                     if (
                         current_intent in ("SALES_AI", "REAL_ESTATE")
                         and self.sales_flow
+                        and self.slot_extractor
+                        and self.slot_extractor.enabled
                     ):
                         try:
-                            user_context_data = (
-                                await self.sales_flow.auto_extract_slots(
+                            # Получаем недостающие слоты перед извлечением
+                            missing_slots = self.sales_flow.get_missing_slots(
+                                user_context_data, current_intent
+                            )
+                            
+                            if missing_slots:
+                                # Извлекаем слоты с confidence
+                                extracted_slots_list = await self.slot_extractor.extract_slots(
+                                    message_text, current_intent, missing_slots
+                                )
+                                
+                                # Обновляем контекст с извлеченными слотами
+                                if extracted_slots_list:
+                                    for slot_info in extracted_slots_list:
+                                        field = slot_info.get("field")
+                                        value = slot_info.get("value")
+                                        confidence = slot_info.get("confidence", 0.7)
+                                        source = slot_info.get("source", "llm")
+                                        
+                                        # Сохраняем слот с confidence через memory
+                                        self.memory.update_slot_with_confidence(
+                                            sender.id, field, value, confidence, source
+                                        )
+                                        
+                                        # Публикуем событие SLOT_FOUND
+                                        if self.event_bus:
+                                            self.event_bus.publish(
+                                                Event(
+                                                    name=EVENT_SLOT_FOUND,
+                                                    payload={
+                                                        "field": field,
+                                                        "value": value,
+                                                        "confidence": confidence,
+                                                        "source": source,
+                                                        "user_id": sender.id,
+                                                    },
+                                                    timestamp=time.time(),
+                                                )
+                                            )
+                                    
+                                    # Обновляем user_context_data после сохранения слотов
+                                    user_context_data = self.memory.get_user_context(sender.id)
+                                    
+                                    # Проверяем confidence и генерируем уточняющие вопросы
+                                    low_conf_slots = self.sales_flow.get_low_confidence_slots(
+                                        user_context_data, threshold=0.6
+                                    )
+                                    medium_conf_slots = self.sales_flow.get_medium_confidence_slots(
+                                        user_context_data, threshold_min=0.6, threshold_max=0.8
+                                    )
+                                    
+                                    # Проверяем согласие на сбор контактов (PDPA)
+                                    if "contact" in [s["field"] for s in extracted_slots_list]:
+                                        if (
+                                            self.consent_manager
+                                            and not self.consent_manager.check_consent(
+                                                sender.id, ConsentManager.CONSENT_PDPA_PROFILE
+                                            )
+                                        ):
+                                            # Запрашиваем согласие
+                                            consent_message = self.consent_manager.request_consent(
+                                                sender.id,
+                                                ConsentManager.CONSENT_PDPA_PROFILE,
+                                                "Для продолжения нужно ваше согласие на обработку персональных данных.",
+                                            )
+                                            if consent_message:
+                                                # Сохраняем флаг что нужно запросить согласие
+                                                if user_context_data:
+                                                    try:
+                                                        context_dict = json.loads(user_context_data)
+                                                    except (json.JSONDecodeError, ValueError):
+                                                        context_dict = {}
+                                                else:
+                                                    context_dict = {}
+                                                context_dict["pending_consent"] = {
+                                                    "type": ConsentManager.CONSENT_PDPA_PROFILE,
+                                                    "message": consent_message,
+                                                }
+                                                user_context_data = json.dumps(context_dict)
+                                                self.memory.save_user_context(sender.id, user_context_data)
+                                    
+                                    # Если есть слоты с низкой confidence - генерируем уточняющий вопрос
+                                    if low_conf_slots and current_stage == SalesStage.NEEDS_DISCOVERY:
+                                        # Берем первый слот с низкой confidence
+                                        field_to_clarify = low_conf_slots[0]
+                                        slots_with_conf = self.sales_flow.get_slots_with_confidence(
+                                            user_context_data
+                                        )
+                                        slot_data = slots_with_conf.get(field_to_clarify, {})
+                                        value = slot_data.get("value", "")
+                                        
+                                        # Генерируем уточняющий вопрос через LLM
+                                        clarification_prompt = f"""Пользователь сказал: "{message_text}"
+
+Я извлек информацию о поле "{field_to_clarify}": "{value}", но уверенность низкая.
+
+Сгенерируй ОДИН короткий уточняющий вопрос для этого поля. Вопрос должен быть естественным и не навязчивым.
+
+Примеры хороших вопросов:
+- "Уточни, пожалуйста, какая именно задача отнимает больше всего времени?"
+- "Правильно ли я понял, что у вас около 50 сотрудников?"
+- "Можешь уточнить название компании?"
+
+Вопрос (максимум 1 предложение):"""
+
+                                        clarification_messages = [
+                                            {"role": "user", "content": clarification_prompt}
+                                        ]
+                                        clarification_question = await self.ai_client.get_response(
+                                            clarification_messages,
+                                            temperature=0.5,
+                                            max_tokens=100,
+                                        )
+                                        
+                                        # Сохраняем уточняющий вопрос для добавления к ответу
+                                        if clarification_question:
+                                            # Добавим к response позже, после генерации основного ответа
+                                            # Пока сохраняем в контекст для использования
+                                            if user_context_data:
+                                                try:
+                                                    context_dict = json.loads(user_context_data)
+                                                except (json.JSONDecodeError, ValueError):
+                                                    context_dict = {}
+                                            else:
+                                                context_dict = {}
+                                            context_dict["pending_clarification"] = {
+                                                "field": field_to_clarify,
+                                                "question": clarification_question.strip(),
+                                            }
+                                            user_context_data = json.dumps(context_dict)
+                                            self.memory.save_user_context(sender.id, user_context_data)
+                                    
+                                    # Если есть слоты со средней confidence - мягко подтверждаем
+                                    elif medium_conf_slots and current_stage == SalesStage.NEEDS_DISCOVERY:
+                                        # Берем первый слот со средней confidence
+                                        field_to_confirm = medium_conf_slots[0]
+                                        slots_with_conf = self.sales_flow.get_slots_with_confidence(
+                                            user_context_data
+                                        )
+                                        slot_data = slots_with_conf.get(field_to_confirm, {})
+                                        value = slot_data.get("value", "")
+                                        
+                                        # Сохраняем подтверждение для добавления к ответу
+                                        if user_context_data:
+                                            try:
+                                                context_dict = json.loads(user_context_data)
+                                            except (json.JSONDecodeError, ValueError):
+                                                context_dict = {}
+                                        else:
+                                            context_dict = {}
+                                        context_dict["pending_confirmation"] = {
+                                            "field": field_to_confirm,
+                                            "value": value,
+                                        }
+                                        user_context_data = json.dumps(context_dict)
+                                        self.memory.save_user_context(sender.id, user_context_data)
+                            else:
+                                # Используем старый метод для обратной совместимости
+                                user_context_data = await self.sales_flow.auto_extract_slots(
                                     message_text, user_context_data, current_intent
                                 )
-                            )
-                            self.memory.save_user_context(sender.id, user_context_data)
+                                self.memory.save_user_context(sender.id, user_context_data)
 
                         except Exception as e:
                             logger.error(
@@ -1120,13 +1330,44 @@ class TelegramUserClient:
                         slots = self.sales_flow.get_slots(user_context_data)
                         is_ready = self.meeting_summary.is_ready_for_meeting(slots)
 
+                        # Проверяем явный запрос на встречу
+                        explicit_request = any(
+                            keyword in message_text.lower()
+                            for keyword in [
+                                "созвониться",
+                                "встретиться",
+                                "поговорить",
+                                "обсудить",
+                                "консультация",
+                                "встреча",
+                                "созвон",
+                            ]
+                        )
+                        
+                        # Вычисляем fit_score
+                        fit_score = self.sales_flow.compute_fit_score(user_context_data)
+                        breakdown = self.sales_flow.get_fit_score_breakdown(user_context_data)
+                        logger.info(
+                            f"Fit score for user {sender.id}: {fit_score}/100 "
+                            f"(breakdown: {breakdown['components']})"
+                        )
+                        
                         # Проверяем, нужно ли предложить консультацию
                         should_offer = self.sales_flow.should_offer_consultation(
                             user_context_data,
                             current_intent,
                             presentation_messages_count,
                             is_ready,
+                            explicit_request=explicit_request,
                         )
+                        
+                        # Если fit_score < 60 и нет явного запроса - не предлагаем встречу
+                        if fit_score < self.sales_flow.FIT_SCORE_THRESHOLD and not explicit_request:
+                            should_offer = False
+                            logger.info(
+                                f"Not offering consultation: fit_score={fit_score} < threshold={self.sales_flow.FIT_SCORE_THRESHOLD}, "
+                                f"explicit_request={explicit_request}"
+                            )
 
                         if should_offer:
                             logger.info(
@@ -1171,7 +1412,11 @@ class TelegramUserClient:
                             )
 
                 # Получаем максимальную длину ответа для текущего этапа
-                if self.sales_flow and self.sales_flow.enabled and current_stage is not None:
+                if (
+                    self.sales_flow
+                    and self.sales_flow.enabled
+                    and current_stage is not None
+                ):
                     max_response_length = self.sales_flow.get_stage_max_length(
                         current_stage
                     )
@@ -1179,7 +1424,11 @@ class TelegramUserClient:
                     max_response_length = None
 
                 # Модифицируем системный промпт для текущего этапа
-                if self.sales_flow and self.sales_flow.enabled and current_stage is not None:
+                if (
+                    self.sales_flow
+                    and self.sales_flow.enabled
+                    and current_stage is not None
+                ):
                     stage_modifier = self.sales_flow.get_stage_prompt_modifier(
                         current_stage
                     )
@@ -1256,9 +1505,7 @@ class TelegramUserClient:
                         else:
                             # Основного промпта нет - добавляем его сначала, затем модификаторы
                             if main_prompt:
-                                msg["content"] = (
-                                    main_prompt + "\n\n" + full_modifier
-                                )
+                                msg["content"] = main_prompt + "\n\n" + full_modifier
                             else:
                                 msg["content"] = content + "\n\n" + full_modifier
                         system_found = True
@@ -1393,6 +1640,130 @@ class TelegramUserClient:
                             )
                             # Ждем оптимальный интервал (typing продолжает показываться если мы в контексте)
                             await asyncio.sleep(optimal_interval)
+
+                    # Добавляем уточняющие вопросы, подтверждения или запросы согласия если есть
+                    if user_context_data:
+                        try:
+                            context_dict = json.loads(user_context_data)
+                            
+                            # Обрабатываем запрос согласия (приоритет)
+                            if "pending_consent" in context_dict:
+                                consent_info = context_dict["pending_consent"]
+                                consent_message = consent_info.get("message", "")
+                                if consent_message:
+                                    response = consent_message
+                                    # Не удаляем pending_consent - ждем ответа пользователя
+                            
+                            # Добавляем уточняющий вопрос при низкой confidence
+                            elif "pending_clarification" in context_dict:
+                                clarification = context_dict["pending_clarification"]
+                                response = f"{response}\n\n{clarification['question']}"
+                                # Удаляем из контекста после использования
+                                context_dict.pop("pending_clarification", None)
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                            
+                            # Добавляем мягкое подтверждение при средней confidence
+                            elif "pending_confirmation" in context_dict:
+                                confirmation = context_dict["pending_confirmation"]
+                                value = confirmation.get("value", "")
+                                field = confirmation.get("field", "")
+                                # Генерируем естественное подтверждение
+                                confirmation_text = f"Верно ли, что {value}?"
+                                response = f"{response}\n\n{confirmation_text}"
+                                # Удаляем из контекста после использования
+                                context_dict.pop("pending_confirmation", None)
+                                user_context_data = json.dumps(context_dict)
+                                self.memory.save_user_context(sender.id, user_context_data)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    
+                                    # Обрабатываем ответ на запрос согласия
+                    if user_context_data:
+                        try:
+                            context_dict = json.loads(user_context_data)
+                            
+                            # Проверяем подтверждение предброни
+                            if "last_event_id" in context_dict and self.calendar:
+                                last_event_id = context_dict.get("last_event_id")
+                                # Проверяем, является ли это предбронь (содержит [TENTATIVE] в названии)
+                                try:
+                                    event = self.calendar.service.events().get(
+                                        calendarId="primary", eventId=last_event_id
+                                    ).execute()
+                                    if "[TENTATIVE]" in event.get("summary", ""):
+                                        # Парсим ответ пользователя на подтверждение
+                                        confirmation_keywords = [
+                                            "да", "yes", "ок", "ok", "подтверждаю",
+                                            "подтверждаем", "создать", "создай", "✅", "👍"
+                                        ]
+                                        if any(keyword in message_text.lower() for keyword in confirmation_keywords):
+                                            # Подтверждаем предбронь
+                                            self.calendar.confirm_tentative_event(last_event_id)
+                                            logger.info(f"Tentative event confirmed: {last_event_id}")
+                                            
+                                            # Обновляем контекст
+                                            context_dict["last_event_id"] = last_event_id
+                                            user_context_data = json.dumps(context_dict)
+                                            self.memory.save_user_context(sender.id, user_context_data)
+                                            
+                                            await self.safe_reply(
+                                                event,
+                                                "✅ Встреча подтверждена!"
+                                            )
+                                            if self.global_rate_limiter:
+                                                self.global_rate_limiter.record_message()
+                                            return
+                                except Exception as e:
+                                    logger.debug(f"Error checking tentative event: {e}")
+                            
+                            # Обрабатываем запрос согласия
+                            if "pending_consent" in context_dict and self.consent_manager:
+                                consent_info = context_dict["pending_consent"]
+                                consent_type = consent_info.get("type")
+                                
+                                # Парсим ответ пользователя
+                                consent_granted = self.consent_manager.parse_consent_response(
+                                    message_text
+                                )
+                                
+                                if consent_granted is not None:
+                                    # Записываем согласие
+                                    self.consent_manager.record_consent(
+                                        sender.id, consent_type, consent_granted
+                                    )
+                                    
+                                    # Публикуем событие
+                                    if self.event_bus:
+                                        self.event_bus.publish(
+                                            Event(
+                                                name=EVENT_CONSENT_GIVEN,
+                                                payload={
+                                                    "consent_type": consent_type,
+                                                    "granted": consent_granted,
+                                                    "user_id": sender.id,
+                                                },
+                                                timestamp=time.time(),
+                                            )
+                                        )
+                                    
+                                    # Удаляем из контекста
+                                    context_dict.pop("pending_consent", None)
+                                    user_context_data = json.dumps(context_dict)
+                                    self.memory.save_user_context(sender.id, user_context_data)
+                                    
+                                    if consent_granted:
+                                        response = "Спасибо! Продолжаем."
+                                    else:
+                                        response = "Понял. Без вашего согласия я не буду сохранять персональные данные."
+                                    
+                                    # Отправляем ответ о согласии и выходим (не генерируем основной ответ)
+                                    await self.safe_reply(event, response)
+                                    if self.global_rate_limiter:
+                                        self.global_rate_limiter.record_message()
+                                    return
+                        except (json.JSONDecodeError, ValueError):
+                            pass
 
                     # Отправляем ответ
                     await self.safe_reply(event, response)
@@ -1693,14 +2064,37 @@ class TelegramUserClient:
                                         )
                                         return
 
-                                    # Создаем встречу на указанное время
-                                    event_id = self.calendar.create_event(
+                                    # Проверяем согласие на создание встречи
+                                    if (
+                                        self.consent_manager
+                                        and not self.consent_manager.check_consent(
+                                            sender.id, ConsentManager.CONSENT_CALENDAR_INVITE
+                                        )
+                                    ):
+                                        # Запрашиваем согласие
+                                        consent_message = self.consent_manager.request_consent(
+                                            sender.id,
+                                            ConsentManager.CONSENT_CALENDAR_INVITE,
+                                            "Для создания встречи в календаре нужно ваше согласие.",
+                                        )
+                                        if consent_message:
+                                            await self.safe_reply(event, consent_message)
+                                            if self.global_rate_limiter:
+                                                self.global_rate_limiter.record_message()
+                                            return
+                                    
+                                    # Создаем предбронь на указанное время
+                                    tentative_event_id = self.calendar.create_tentative_event(
                                         summary="Консультация Scanovich.ai",
                                         description="Консультация с пользователем Telegram",
                                         start_time=extracted_time,
                                         end_time=end_time,
                                         user_id=sender.id,
+                                        tentative_until_minutes=15,
                                     )
+                                    
+                                    # Пока сохраняем tentative_event_id, подтвердим позже
+                                    event_id = tentative_event_id
 
                                     # Сохраняем контекст встречи
                                     if user_context_data:
@@ -1762,6 +2156,19 @@ class TelegramUserClient:
                                                 ):
                                                     pass
 
+                                            # Вычисляем fit_score для включения в сводку
+                                            fit_score = self.sales_flow.compute_fit_score(
+                                                user_context_data
+                                            )
+                                            
+                                            # Добавляем fit_score в слоты для отчета
+                                            slots["fit_score"] = fit_score
+                                            
+                                            # Генерируем мини-повестку
+                                            mini_agenda = self.meeting_summary.generate_mini_agenda(
+                                                slots, fit_score
+                                            )
+                                            
                                             # Генерируем полную сводку
                                             full_summary = self.meeting_summary.generate_full_summary(
                                                 slots,
@@ -1776,16 +2183,26 @@ class TelegramUserClient:
                                                 conversation_history,
                                                 current_stage_str,
                                             )
+                                            
+                                            # Проверяем согласие перед отправкой отчета
+                                            if (
+                                                self.consent_manager
+                                                and not self.consent_manager.check_consent(
+                                                    sender.id, ConsentManager.CONSENT_CALENDAR_INVITE
+                                                )
+                                            ):
+                                                logger.warning(
+                                                    f"Not sending meeting summary: consent not granted for user_id={sender.id}"
+                                                )
+                                                owner_report = None
 
                                             # Сохраняем summary в контекст
-                                            context_dict["meeting_summary"] = (
-                                                full_summary
-                                            )
+                                            context_dict["meeting_summary"] = full_summary
                                             context_dict["meeting_summary_json"] = (
-                                                self.meeting_summary.generate_json_summary(
-                                                    slots
-                                                )
+                                                self.meeting_summary.generate_json_summary(slots)
                                             )
+                                            context_dict["meeting_mini_agenda"] = mini_agenda
+                                            context_dict["meeting_fit_score"] = fit_score
 
                                             # Отправляем отчет владельцу
                                             if owner_report:
@@ -1810,29 +2227,100 @@ class TelegramUserClient:
                                         sender.id, json.dumps(context_dict)
                                     )
 
-                                    # Логируем время в локальной таймзоне для читаемости
-                                    logger.info(
-                                        f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} "
-                                        f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
-                                    )
-                                    # Отправляем пользователю сообщение с локальным временем
-                                    await self.safe_reply(
-                                        event,
-                                        f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!",
-                                    )
+                                    # Проверяем, является ли это предбронь
+                                    if user_context_data:
+                                        try:
+                                            context_dict = json.loads(user_context_data)
+                                            last_event_id = context_dict.get("last_event_id")
+                                            if last_event_id == tentative_event_id:
+                                                # Это предбронь - нужно подтверждение
+                                                # Публикуем событие TIME_PROPOSED
+                                                if self.event_bus:
+                                                    self.event_bus.publish(
+                                                        Event(
+                                                            name=EVENT_TIME_PROPOSED,
+                                                            payload={
+                                                                "time": extracted_time.isoformat(),
+                                                                "event_id": tentative_event_id,
+                                                                "user_id": sender.id,
+                                                            },
+                                                            timestamp=time.time(),
+                                                        )
+                                                    )
+                                                
+                                                logger.info(
+                                                    f"✅ Tentative event created: {tentative_event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} "
+                                                    f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
+                                                )
+                                                # Отправляем пользователю сообщение с подтверждением
+                                                await self.safe_reply(
+                                                    event,
+                                                    f"✅ Предбронь создана на {extracted_time.strftime('%d.%m в %H:%M')}!\n\n"
+                                                    "Подтвердите встречу в течение 15 минут, иначе она будет автоматически отменена.",
+                                                )
+                                            else:
+                                                # Подтверждаем предбронь
+                                                if last_event_id:
+                                                    self.calendar.confirm_tentative_event(last_event_id)
+                                                
+                                                logger.info(
+                                                    f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} "
+                                                    f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
+                                                )
+                                                # Отправляем пользователю сообщение с локальным временем
+                                                await self.safe_reply(
+                                                    event,
+                                                    f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!",
+                                                )
+                                        except (json.JSONDecodeError, ValueError):
+                                            # Если не удалось проверить - просто создаем обычное событие
+                                            logger.info(
+                                                f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} "
+                                                f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
+                                            )
+                                            await self.safe_reply(
+                                                event,
+                                                f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!",
+                                            )
+                                    else:
+                                        logger.info(
+                                            f"✅ Consultation event created: {event_id} at {extracted_time.strftime('%Y-%m-%d %H:%M')} "
+                                            f"(local timezone: {self.calendar.timezone_name}, user_id={sender.id})"
+                                        )
+                                        await self.safe_reply(
+                                            event,
+                                            f"✅ Встреча создана на {extracted_time.strftime('%d.%m в %H:%M')}!",
+                                        )
+                                    
                                     if self.global_rate_limiter:
                                         self.global_rate_limiter.record_message()
                                 else:
-                                    # Предлагаем доступные слоты
-                                    slots = self.calendar.suggest_available_slots()
-                                    slots_text = "\n".join(
-                                        f"• {slot}" for slot in slots
+                                    # Предлагаем доступные слоты с учетом таймзоны пользователя
+                                    user_timezone = self.memory.get_user_timezone(sender.id)
+                                    suggested_slots = self.calendar.suggest_time_slots(
+                                        user_timezone=user_timezone, count=3
                                     )
-                                    await self.safe_reply(
-                                        event,
-                                        f"📅 Предлагаю следующие варианты времени:\n{slots_text}\n\n"
-                                        "Напишите удобное время, и я создам встречу!",
-                                    )
+                                    
+                                    if suggested_slots:
+                                        slots_text = "\n".join(
+                                            f"• {slot.strftime('%d.%m в %H:%M')}" for slot in suggested_slots
+                                        )
+                                        await self.safe_reply(
+                                            event,
+                                            f"📅 Предлагаю следующие варианты времени:\n{slots_text}\n\n"
+                                            "Напишите удобное время, и я создам встречу!",
+                                        )
+                                    else:
+                                        # Fallback на старый метод
+                                        slots = self.calendar.suggest_available_slots()
+                                        slots_text = "\n".join(
+                                            f"• {slot}" for slot in slots
+                                        )
+                                        await self.safe_reply(
+                                            event,
+                                            f"📅 Предлагаю следующие варианты времени:\n{slots_text}\n\n"
+                                            "Напишите удобное время, и я создам встречу!",
+                                        )
                                     if self.global_rate_limiter:
                                         self.global_rate_limiter.record_message()
                         except Exception as e:

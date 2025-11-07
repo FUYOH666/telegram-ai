@@ -1,5 +1,6 @@
 """Интеграция с Google Calendar API."""
 
+import hashlib
 import logging
 import re
 from datetime import datetime, time, timedelta
@@ -173,6 +174,29 @@ class GoogleCalendar:
         if description:
             event["description"] = description
 
+        # Проверяем идемпотентность перед созданием
+        if user_id is not None:
+            event_hash = self.generate_event_hash(user_id, start_time, "consultation")
+            # Проверяем существующие события пользователя на дубликаты
+            user_events = self.find_user_events(user_id, time_min=start_time - timedelta(hours=1))
+            for existing_event in user_events:
+                existing_start_str = existing_event["start"].get("dateTime")
+                if existing_start_str:
+                    try:
+                        existing_start = datetime.fromisoformat(
+                            existing_start_str.replace("Z", "+00:00")
+                        ).astimezone(self.timezone)
+                        existing_hash = self.generate_event_hash(
+                            user_id, existing_start.replace(tzinfo=None), "consultation"
+                        )
+                        if existing_hash == event_hash:
+                            logger.info(
+                                f"Duplicate event detected (hash={event_hash}), returning existing event_id"
+                            )
+                            return existing_event.get("id")
+                    except (ValueError, AttributeError):
+                        continue
+
         try:
             event = (
                 self.service.events()
@@ -305,6 +329,243 @@ class GoogleCalendar:
         except HttpError as e:
             logger.error(f"Error finding user events: {e}")
             raise
+
+    def suggest_time_slots(
+        self, user_timezone: Optional[str] = None, count: int = 3
+    ) -> List[datetime]:
+        """
+        Предложить доступные слоты времени с учётом таймзоны пользователя.
+
+        Args:
+            user_timezone: Часовой пояс пользователя (например, "Europe/Moscow")
+            count: Количество слотов для предложения (по умолчанию 3)
+
+        Returns:
+            Список datetime объектов с предложенными слотами времени
+        """
+        # Используем таймзону пользователя или дефолтную
+        if user_timezone:
+            try:
+                user_tz = pytz.timezone(user_timezone)
+            except pytz.exceptions.UnknownTimeZoneError:
+                logger.warning(f"Unknown user timezone: {user_timezone}, using default")
+                user_tz = self.timezone
+        else:
+            user_tz = self.timezone
+
+        now = datetime.now(user_tz)
+        suggested_slots = []
+
+        # Предлагаем слоты на ближайшие рабочие дни
+        for day_offset in range(0, 7):  # Проверяем ближайшую неделю
+            target_date = (now + timedelta(days=day_offset)).date()
+            weekday = target_date.weekday()
+
+            # Пропускаем выходные (суббота=5, воскресенье=6)
+            if weekday >= 5:
+                continue
+
+            # Предлагаем слоты из available_slots
+            for slot_time_str in self.available_slots:
+                try:
+                    hour, minute = map(int, slot_time_str.split(":"))
+                    slot_time = user_tz.localize(
+                        datetime.combine(target_date, time(hour, minute))
+                    )
+
+                    # Проверяем что время в будущем
+                    if slot_time <= now:
+                        continue
+
+                    # Проверяем конфликты
+                    end_time = slot_time + timedelta(
+                        minutes=self.default_consultation_duration_minutes
+                    )
+                    has_conflict, _ = self.check_time_conflict(slot_time, end_time)
+
+                    if not has_conflict:
+                        suggested_slots.append(slot_time.replace(tzinfo=None))  # Naive для совместимости
+                        if len(suggested_slots) >= count:
+                            break
+
+                except (ValueError, IndexError):
+                    logger.warning(f"Invalid slot time format: {slot_time_str}")
+                    continue
+
+            if len(suggested_slots) >= count:
+                break
+
+        logger.info(
+            f"Suggested {len(suggested_slots)} time slots for timezone {user_timezone or self.timezone_name}"
+        )
+        return suggested_slots
+
+    def generate_event_hash(
+        self, client_id: int, start_ts: datetime, topic: str = "consultation"
+    ) -> str:
+        """
+        Сгенерировать идемпотентный хэш для события.
+
+        Args:
+            client_id: ID клиента
+            start_ts: Время начала события
+            topic: Тема события (по умолчанию "consultation")
+
+        Returns:
+            SHA1 хэш строки
+        """
+        # Нормализуем время для хэша (убираем секунды и микросекунды)
+        normalized_time = start_ts.replace(second=0, microsecond=0)
+        hash_string = f"{client_id}_{normalized_time.isoformat()}_{topic}"
+        return hashlib.sha1(hash_string.encode()).hexdigest()
+
+    def create_tentative_event(
+        self,
+        summary: str,
+        start_time: datetime,
+        end_time: Optional[datetime] = None,
+        description: Optional[str] = None,
+        user_id: Optional[int] = None,
+        tentative_until_minutes: int = 15,
+    ) -> str:
+        """
+        Создать предбронь (tentative event) на указанное время.
+
+        Args:
+            summary: Название события
+            start_time: Время начала
+            end_time: Время окончания (по умолчанию start_time + default_consultation_duration_minutes)
+            description: Описание события
+            user_id: ID пользователя Telegram
+            tentative_until_minutes: Время до авто-отмены предброни в минутах (по умолчанию 15)
+
+        Returns:
+            ID созданного события
+        """
+        if end_time is None:
+            end_time = start_time + timedelta(
+                minutes=self.default_consultation_duration_minutes
+            )
+
+        # Локализуем время если нужно
+        if start_time.tzinfo is None:
+            start_time = self.timezone.localize(start_time)
+        else:
+            start_time = start_time.astimezone(self.timezone)
+
+        if end_time.tzinfo is None:
+            end_time = self.timezone.localize(end_time)
+        else:
+            end_time = end_time.astimezone(self.timezone)
+
+        # Вычисляем время авто-отмены
+        tentative_until = datetime.now(self.timezone) + timedelta(
+            minutes=tentative_until_minutes
+        )
+
+        # Форматируем время
+        start_iso = start_time.strftime("%Y-%m-%dT%H:%M:%S")
+        end_iso = end_time.strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Формируем описание с меткой предброни
+        full_description = f"[TENTATIVE] Предбронь до {tentative_until.strftime('%Y-%m-%d %H:%M')}\n"
+        if description:
+            full_description += f"{description}\n"
+        full_description += f"tentative_until: {tentative_until.isoformat()}\n"
+        if user_id is not None:
+            full_description += f"user_id:{user_id}"
+
+        event = {
+            "summary": f"[TENTATIVE] {summary}",
+            "description": full_description,
+            "start": {
+                "dateTime": start_iso,
+                "timeZone": self.timezone_name,
+            },
+            "end": {
+                "dateTime": end_iso,
+                "timeZone": self.timezone_name,
+            },
+        }
+
+        try:
+            event = (
+                self.service.events()
+                .insert(calendarId="primary", body=event)
+                .execute()
+            )
+            event_id = event.get("id")
+            logger.info(
+                f"Tentative event created: {event_id} - {summary} "
+                f"(tentative until {tentative_until.strftime('%Y-%m-%d %H:%M')}, user_id={user_id})"
+            )
+            return event_id
+        except HttpError as e:
+            logger.error(f"Error creating tentative event: {e}")
+            raise
+
+    def confirm_tentative_event(self, event_id: str) -> bool:
+        """
+        Подтвердить предбронь (убрать метку [TENTATIVE]).
+
+        Args:
+            event_id: ID события
+
+        Returns:
+            True если подтверждено успешно
+        """
+        try:
+            # Получаем событие
+            event = (
+                self.service.events()
+                .get(calendarId="primary", eventId=event_id)
+                .execute()
+            )
+
+            # Убираем метку [TENTATIVE] из summary
+            summary = event.get("summary", "")
+            if summary.startswith("[TENTATIVE] "):
+                summary = summary[13:]  # Убираем "[TENTATIVE] "
+            event["summary"] = summary
+
+            # Убираем информацию о предброни из description
+            description = event.get("description", "")
+            if "[TENTATIVE]" in description:
+                # Удаляем строки с [TENTATIVE] и tentative_until
+                lines = description.split("\n")
+                filtered_lines = [
+                    line
+                    for line in lines
+                    if "[TENTATIVE]" not in line and "tentative_until:" not in line
+                ]
+                description = "\n".join(filtered_lines).strip()
+                event["description"] = description
+
+            # Обновляем событие
+            updated_event = (
+                self.service.events()
+                .update(calendarId="primary", eventId=event_id, body=event)
+                .execute()
+            )
+
+            logger.info(f"Tentative event confirmed: {event_id}")
+            return True
+
+        except HttpError as e:
+            logger.error(f"Error confirming tentative event: {e}")
+            raise
+
+    def cancel_tentative_event(self, event_id: str) -> bool:
+        """
+        Отменить предбронь (удалить событие).
+
+        Args:
+            event_id: ID события
+
+        Returns:
+            True если отменено успешно
+        """
+        return self.delete_event(event_id)
 
     def find_latest_user_event(self, user_id: int) -> Optional[dict]:
         """
