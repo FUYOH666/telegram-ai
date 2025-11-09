@@ -21,6 +21,17 @@ class SalesStage(str, Enum):
     SUMMARY = "summary"
 
 
+class ObjectionType(str, Enum):
+    """Типы возражений клиентов."""
+
+    PRICE = "price"  # Цена/бюджет
+    TIMING = "timing"  # Время/сроки
+    NEED = "need"  # Необходимость/потребность
+    TRUST = "trust"  # Доверие/репутация
+    COMPETITOR = "competitor"  # Конкуренты
+    OTHER = "other"  # Другие возражения
+
+
 class SalesFlow:
     """Управление скриптом продаж с state machine и слотами."""
 
@@ -159,7 +170,94 @@ class SalesFlow:
         "встретиться",
     ]
 
-    def __init__(self, enabled: bool = True, slot_extractor=None, event_bus=None):
+    # Ключевые слова для классификации типов возражений
+    PRICE_KEYWORDS = [
+        "дорого", "дорогой", "дорогая", "дорогие",
+        "бюджет", "стоимость", "цена", "стоит",
+        "дешевле", "дешево", "не по карману",
+        "expensive", "cost", "price", "budget",
+        "too much", "afford",
+    ]
+    TIMING_KEYWORDS = [
+        "позже", "не сейчас", "не время", "некогда",
+        "потом", "в другой раз", "сейчас не готов",
+        "later", "not now", "not ready", "timing",
+        "too early", "too late",
+    ]
+    NEED_KEYWORDS = [
+        "не нужно", "не нужен", "не нужна", "не нужны",
+        "не интересно", "не интересен", "не интересна",
+        "не требуется", "не требуется", "не актуально",
+        "don't need", "not needed", "not interested",
+        "not relevant", "not necessary",
+    ]
+    TRUST_KEYWORDS = [
+        "сомневаюсь", "не уверен", "не уверена",
+        "не доверяю", "не знаю", "не знаком",
+        "риск", "опасно", "ненадежно",
+        "doubt", "not sure", "don't trust",
+        "risk", "unsure", "uncertain",
+    ]
+    COMPETITOR_KEYWORDS = [
+        "конкурент", "конкуренты", "другая компания",
+        "уже есть", "используем другое",
+        "competitor", "other company", "already have",
+        "using something else",
+    ]
+
+    # Шаблоны ответов на возражения
+    OBJECTION_RESPONSE_TEMPLATES = {
+        ObjectionType.PRICE: {
+            "approach": "Понимаю, бюджет — важный фактор. Давайте посмотрим на ценность решения.",
+            "examples": [
+                "Понимаю, бюджет — важный фактор. Давайте посчитаем: если AI сэкономит 10 часов в неделю — сколько это стоит в деньгах?",
+                "Я ценю вашу озабоченность по бюджету. Можем обсудить поэтапное внедрение — начать с малого и масштабировать по мере получения результатов.",
+                "Давайте посмотрим на ROI: сколько сейчас уходит на ручную работу? AI может сократить эти затраты на 70-80%.",
+            ],
+        },
+        ObjectionType.TIMING: {
+            "approach": "Понимаю, сейчас может быть не самое подходящее время. Давайте обсудим оптимальные сроки.",
+            "examples": [
+                "Понимаю, сейчас может быть не самое подходящее время. Когда вы планируете вернуться к этому вопросу?",
+                "Хорошо, давайте зафиксируем вашу задачу. Когда будете готовы обсудить — напишите, я подготовлю предложение.",
+                "Ничего страшного. Можем просто созвониться на 15 минут, чтобы я понял вашу задачу и подготовил решение к нужному моменту.",
+            ],
+        },
+        ObjectionType.NEED: {
+            "approach": "Понимаю вашу точку зрения. Давайте разберемся, действительно ли это решение вам нужно.",
+            "examples": [
+                "Понимаю вашу точку зрения. Расскажите, какие задачи сейчас отнимают больше всего времени? Возможно, есть что-то, что можно автоматизировать.",
+                "Хорошо, давайте разберемся. Какие процессы в вашей компании сейчас самые трудоемкие? Может быть, там есть место для оптимизации.",
+                "Понятно. А если бы у вас была возможность сократить время на рутинные задачи на 70% — это было бы полезно?",
+            ],
+        },
+        ObjectionType.TRUST: {
+            "approach": "Понимаю ваши сомнения. Давайте обсудим, что поможет вам почувствовать уверенность.",
+            "examples": [
+                "Понимаю ваши сомнения. Могу показать примеры похожих проектов, которые мы реализовали. Это поможет понять, как это работает.",
+                "Я ценю вашу осторожность. Давайте начнем с небольшого пилотного проекта — это позволит оценить результат без больших рисков.",
+                "Понимаю, важно быть уверенным в решении. Можем обсудить ваши конкретные опасения — разберемся вместе.",
+            ],
+        },
+        ObjectionType.COMPETITOR: {
+            "approach": "Понимаю, вы рассматриваете разные варианты. Давайте обсудим, что важно для вас в решении.",
+            "examples": [
+                "Понимаю, вы рассматриваете разные варианты. Что для вас важнее всего в решении? Может быть, я смогу предложить что-то, что лучше подходит под ваши задачи.",
+                "Хорошо, давайте сравним. Какие критерии для вас самые важные? Цена, качество, скорость внедрения, поддержка?",
+                "Понятно. А что именно вас не устраивает в текущем решении? Может быть, есть конкретные задачи, которые оно не покрывает?",
+            ],
+        },
+        ObjectionType.OTHER: {
+            "approach": "Понимаю вашу озабоченность. Давайте разберемся вместе, как можно решить эту задачу.",
+            "examples": [
+                "Понимаю вашу озабоченность. Расскажите подробнее, что именно вас беспокоит? Давайте разберемся вместе.",
+                "Хорошо, давайте обсудим. Что конкретно вызывает сомнения? Может быть, я смогу помочь разобраться.",
+                "Понятно. Давайте разберемся по пунктам — что именно вас смущает? Вместе найдем решение.",
+            ],
+        },
+    }
+
+    def __init__(self, enabled: bool = True, slot_extractor=None, event_bus=None, ai_client=None):
         """
         Инициализация SalesFlow.
 
@@ -167,10 +265,12 @@ class SalesFlow:
             enabled: Включить скрипт продаж
             slot_extractor: Экземпляр SlotExtractor для автоматического извлечения слотов
             event_bus: Экземпляр EventBus для публикации событий (опционально)
+            ai_client: Экземпляр AIClient для LLM-based классификации возражений (опционально)
         """
         self.enabled = enabled
         self.slot_extractor = slot_extractor
         self.event_bus = event_bus
+        self.ai_client = ai_client
         
         # Подписываемся на события если event_bus доступен
         if self.event_bus:
@@ -184,7 +284,7 @@ class SalesFlow:
             self.event_bus.subscribe(EVENT_SLOT_CORRECTION, self._handle_slot_correction)
             self.event_bus.subscribe(EVENT_INTENT_CHANGED, self._handle_intent_changed)
         
-        logger.info(f"SalesFlow initialized: enabled={enabled}, event_bus={'enabled' if event_bus else 'disabled'}")
+        logger.info(f"SalesFlow initialized: enabled={enabled}, event_bus={'enabled' if event_bus else 'disabled'}, ai_client={'enabled' if ai_client else 'disabled'}")
 
     def get_stage(self, context_data: Optional[str]) -> SalesStage:
         """
@@ -394,7 +494,8 @@ class SalesFlow:
                 "Примеры естественных реакций:\n"
                 "- 'Понимаю, бюджет — важный фактор. Давайте посмотрим: если AI сэкономит 10 часов в неделю — посчитаем окупаемость?'\n"
                 "- 'Я ценю вашу озабоченность. Можем поэтапно внедрить, начать с малого — как вам такой вариант?'\n\n"
-                "Длина ответа: 2-4 предложения максимум."
+                "Длина ответа: 2-4 предложения максимум.\n\n"
+                "ПРИМЕЧАНИЕ: Для более точных инструкций используй get_objection_prompt_modifier() с типом возражения."
             ),
             SalesStage.CONSULTATION_OFFER: (
                 "Сейчас этап предложения консультации. Предлагай естественно, как логичный следующий шаг.\n\n"
@@ -1180,3 +1281,243 @@ class SalesFlow:
         new_intent = payload.get("intent")
         
         logger.debug(f"Handling INTENT_CHANGED event: new_intent={new_intent}")
+
+    async def classify_objection(self, message: str) -> ObjectionType:
+        """
+        Классифицировать тип возражения на основе сообщения.
+
+        Args:
+            message: Сообщение пользователя с возражением
+
+        Returns:
+            Тип возражения
+        """
+        if not message:
+            return ObjectionType.OTHER
+
+        message_lower = message.lower()
+
+        # Подсчитываем совпадения по типам возражений
+        price_score = sum(1 for keyword in self.PRICE_KEYWORDS if keyword in message_lower)
+        timing_score = sum(1 for keyword in self.TIMING_KEYWORDS if keyword in message_lower)
+        need_score = sum(1 for keyword in self.NEED_KEYWORDS if keyword in message_lower)
+        trust_score = sum(1 for keyword in self.TRUST_KEYWORDS if keyword in message_lower)
+        competitor_score = sum(1 for keyword in self.COMPETITOR_KEYWORDS if keyword in message_lower)
+
+        # Находим тип с максимальным score
+        scores = {
+            ObjectionType.PRICE: price_score,
+            ObjectionType.TIMING: timing_score,
+            ObjectionType.NEED: need_score,
+            ObjectionType.TRUST: trust_score,
+            ObjectionType.COMPETITOR: competitor_score,
+        }
+
+        max_score = max(scores.values())
+        if max_score > 0:
+            # Возвращаем тип с максимальным score
+            for objection_type, score in scores.items():
+                if score == max_score:
+                    logger.debug(f"Classified objection as {objection_type.value} (score={score})")
+                    return objection_type
+
+        # Если нет явных признаков - используем LLM если доступен
+        if self.ai_client:
+            try:
+                return await self._classify_objection_with_llm(message)
+            except Exception as e:
+                logger.warning(f"Error in LLM-based objection classification: {e}")
+                return ObjectionType.OTHER
+
+        return ObjectionType.OTHER
+
+    async def _classify_objection_with_llm(self, message: str) -> ObjectionType:
+        """
+        Классифицировать возражение через LLM.
+
+        Args:
+            message: Сообщение пользователя с возражением
+
+        Returns:
+            Тип возражения
+        """
+        if not self.ai_client:
+            return ObjectionType.OTHER
+
+        prompt = f"""Определи тип возражения клиента в следующем сообщении. Доступные типы:
+
+1. PRICE - возражения по цене/бюджету (дорого, не по карману, бюджет)
+2. TIMING - возражения по времени/срокам (позже, не сейчас, не время)
+3. NEED - возражения по необходимости (не нужно, не интересно, не требуется)
+4. TRUST - возражения по доверию (сомневаюсь, не уверен, риск)
+5. COMPETITOR - упоминание конкурентов (уже есть решение, используем другое)
+6. OTHER - другие возражения
+
+Сообщение клиента: "{message}"
+
+Верни ответ ТОЛЬКО в формате JSON, без дополнительного текста:
+{{
+  "type": "PRICE" | "TIMING" | "NEED" | "TRUST" | "COMPETITOR" | "OTHER",
+  "confidence": 0.0-1.0
+}}"""
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.ai_client.get_response(
+                messages,
+                temperature=0.2,
+                max_tokens=100,
+            )
+
+            # Парсим JSON ответ
+            import json
+            response = response.strip()
+            if response.startswith("```json"):
+                response = response[7:]
+            if response.startswith("```"):
+                response = response[3:]
+            if response.endswith("```"):
+                response = response[:-3]
+            response = response.strip()
+
+            result = json.loads(response)
+            objection_type_str = result.get("type", "OTHER")
+            confidence = result.get("confidence", 0.5)
+
+            try:
+                objection_type = ObjectionType(objection_type_str.lower())
+                logger.debug(
+                    f"LLM classified objection as {objection_type.value} "
+                    f"(confidence={confidence:.2f})"
+                )
+                return objection_type
+            except ValueError:
+                logger.warning(f"Unknown objection type from LLM: {objection_type_str}")
+                return ObjectionType.OTHER
+
+        except Exception as e:
+            logger.warning(f"Error in LLM objection classification: {e}")
+            return ObjectionType.OTHER
+
+    def get_objection_history(self, context_data: Optional[str]) -> List[Dict[str, Any]]:
+        """
+        Получить историю возражений из контекста.
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+
+        Returns:
+            Список словарей с историей возражений:
+            [{"type": str, "message": str, "timestamp": str}, ...]
+        """
+        if not context_data:
+            return []
+
+        try:
+            data = json.loads(context_data)
+            return data.get("objection_history", [])
+        except (json.JSONDecodeError, ValueError):
+            return []
+
+    def add_objection_to_history(
+        self, context_data: Optional[str], objection_type: ObjectionType, message: str
+    ) -> str:
+        """
+        Добавить возражение в историю контекста.
+
+        Args:
+            context_data: Текущий JSON контекст
+            objection_type: Тип возражения
+            message: Сообщение пользователя с возражением
+
+        Returns:
+            Обновленный JSON контекст
+        """
+        if context_data:
+            try:
+                data = json.loads(context_data)
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = {}
+
+        if "objection_history" not in data:
+            data["objection_history"] = []
+
+        # Добавляем возражение в историю
+        data["objection_history"].append(
+            {
+                "type": objection_type.value,
+                "message": message[:200],  # Ограничиваем длину
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+        # Ограничиваем историю последними 10 возражениями
+        data["objection_history"] = data["objection_history"][-10:]
+
+        return json.dumps(data)
+
+    def get_objection_count_by_type(
+        self, context_data: Optional[str], objection_type: ObjectionType
+    ) -> int:
+        """
+        Получить количество возражений определенного типа в истории.
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+            objection_type: Тип возражения
+
+        Returns:
+            Количество возражений данного типа
+        """
+        history = self.get_objection_history(context_data)
+        return sum(1 for obj in history if obj.get("type") == objection_type.value)
+
+    def get_objection_prompt_modifier(
+        self, context_data: Optional[str], objection_type: Optional[ObjectionType] = None
+    ) -> str:
+        """
+        Получить улучшенный промпт-модификатор для этапа OBJECTIONS с учетом типа возражения.
+
+        Args:
+            context_data: JSON строка с контекстом пользователя
+            objection_type: Тип возражения (если известен)
+
+        Returns:
+            Дополнительный текст для системного промпта
+        """
+        base_modifier = (
+            "Сейчас этап работы с возражениями. Работай как консультант, не как продавец.\n\n"
+            "Правила:\n"
+            "- НЕ спорь с клиентом — разбирай сомнения вместе с ним\n"
+            "- Проявляй понимание и эмпатию ('Я ценю вашу озабоченность...')\n"
+            "- Вставай на сторону клиента — пытайся найти компромисс\n"
+            "- Предлагай варианты решения проблемы ('Давайте посмотрим, как можно...')\n"
+        )
+
+        # Если тип возражения известен, добавляем специфичные инструкции
+        if objection_type and objection_type in self.OBJECTION_RESPONSE_TEMPLATES:
+            template = self.OBJECTION_RESPONSE_TEMPLATES[objection_type]
+            base_modifier += f"\n\nТип возражения: {objection_type.value.upper()}\n"
+            base_modifier += f"Подход: {template['approach']}\n\n"
+            base_modifier += "Примеры хороших ответов:\n"
+            for i, example in enumerate(template["examples"][:2], 1):  # Берем первые 2 примера
+                base_modifier += f"{i}. {example}\n"
+
+        # Проверяем историю возражений для эскалации
+        history = self.get_objection_history(context_data)
+        if objection_type:
+            count = self.get_objection_count_by_type(context_data, objection_type)
+            if count >= 2:
+                base_modifier += (
+                    f"\n\n⚠️ ВАЖНО: Это уже {count}-е возражение типа {objection_type.value}. "
+                    "Клиент повторяет одно и то же возражение. Нужно изменить подход:\n"
+                    "- Не повторяй те же аргументы\n"
+                    "- Попробуй другой угол зрения или предложи конкретное действие\n"
+                    "- Если возражение серьезное — предложи встречу для детального обсуждения\n"
+                )
+
+        base_modifier += "\nДлина ответа: 2-4 предложения максимум."
+
+        return base_modifier

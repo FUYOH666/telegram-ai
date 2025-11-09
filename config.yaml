@@ -217,6 +217,7 @@ asr_server:
 
 sales_flow:
   enabled: true
+  use_langgraph: ${SALES_FLOW_USE_LANGGRAPH:true}  # Использовать LangGraph state machine (по умолчанию включен)
 
 slot_extraction:
   enabled: true
@@ -227,6 +228,12 @@ web_search:
   max_results: 3
   max_queries_per_conversation: 2
   timeout: 10
+
+url_parsing:
+  enabled: ${URL_PARSING_ENABLED:true} # включить автоматический парсинг URL в сообщениях
+  max_content_length: 10000 # максимальная длина извлеченного текста (символов)
+  timeout: 10 # таймаут запроса в секундах
+  max_urls_per_message: 3 # максимум URL для парсинга в одном сообщении
 
 intent_classifier:
   use_llm: true # использовать LLM для классификации намерений

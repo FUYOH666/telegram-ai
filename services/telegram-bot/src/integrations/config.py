@@ -253,7 +253,16 @@ class ASRServerConfig(BaseSettings):
 class SalesFlowConfig(BaseSettings):
     """Конфигурация скрипта продаж."""
 
-    enabled: bool = Field(default=True, description="Включить скрипт продаж")
+    enabled: bool = Field(
+        default=True,
+        description="Включить скрипт продаж",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    use_langgraph: bool = Field(
+        default=True,
+        description="Использовать LangGraph state machine вместо простой state machine",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
 
     model_config = SettingsConfigDict(env_prefix="SALES_FLOW_")
 

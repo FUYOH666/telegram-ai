@@ -1,8 +1,9 @@
 """RAG система для поиска актуальной информации о компании/услугах."""
 
 import logging
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .vector_memory import VectorMemory
 
@@ -19,6 +20,7 @@ class RAGSystem:
         knowledge_base_path: Optional[str] = None,
         max_results: int = 3,
         min_score: float = 0.7,
+        log_stats_interval: int = 100,
     ):
         """
         Инициализация RAG системы.
@@ -29,6 +31,7 @@ class RAGSystem:
             knowledge_base_path: Путь к директории с документацией (опционально)
             max_results: Максимальное количество результатов поиска
             min_score: Минимальный score для включения результата
+            log_stats_interval: Интервал для логирования статистики (количество запросов)
         """
         self.enabled = enabled
         self.knowledge_base_path = Path(knowledge_base_path) if knowledge_base_path else None
@@ -36,6 +39,15 @@ class RAGSystem:
         self.min_score = min_score
         self.rag_collection = None
         self.rag_collection_name = None
+        self.log_stats_interval = log_stats_interval
+
+        # Метрики использования
+        self.total_queries = 0
+        self.successful_queries = 0
+        self.empty_results = 0
+        self.total_chunks_found = 0
+        self.scores: List[float] = []  # Все scores для вычисления статистики
+        self.file_usage: Dict[str, int] = defaultdict(int)  # Счетчик использования по файлам
 
         # Создаем отдельную коллекцию для RAG (отдельно от истории сообщений)
         if enabled and vector_memory:
@@ -250,6 +262,9 @@ class RAGSystem:
         if not query or not query.strip():
             return []
 
+        # Обновляем метрики
+        self.total_queries += 1
+
         try:
             # Получаем embedding для запроса
             query_embedding = await self.vector_memory.get_embedding(query)
@@ -284,22 +299,47 @@ class RAGSystem:
                         score = 1.0 - (distance / 2.0) if distance else 0.0
 
                         if score >= self.min_score:
+                            file_path = metadata.get("file_path", "unknown")
                             found_info.append(
                                 {
                                     "content": content,
-                                    "file_path": metadata.get("file_path", ""),
+                                    "file_path": file_path,
                                     "score": score,
                                     "chunk_index": metadata.get("chunk_index", 0),
                                 }
                             )
+                            # Обновляем метрики
+                            self.scores.append(score)
+                            self.file_usage[file_path] += 1
 
+            # Обновляем метрики использования
+            if found_info:
+                self.successful_queries += 1
+                self.total_chunks_found += len(found_info)
+            else:
+                self.empty_results += 1
+                # Логируем случаи, когда RAG не находит релевантной информации
+                logger.debug(
+                    f"RAG: No relevant info found for query '{query[:50]}...' "
+                    f"(min_score={self.min_score:.2f})"
+                )
+
+            # Логируем каждый вызов
+            scores_str = ", ".join([f"{info['score']:.2f}" for info in found_info])
             logger.debug(
-                f"Found {len(found_info)} relevant info chunks for query: {query[:50]}..."
+                f"RAG query #{self.total_queries}: '{query[:50]}...' -> "
+                f"{len(found_info)} chunks found (scores: [{scores_str}])"
             )
+
+            # Периодическое логирование статистики
+            if self.total_queries % self.log_stats_interval == 0:
+                self._log_statistics()
+
             return found_info
 
         except Exception as e:
             logger.error(f"Error searching RAG knowledge base: {e}", exc_info=True)
+            self.empty_results += 1
             return []
 
     def format_context(self, found_info: List[Dict]) -> str:
@@ -330,4 +370,89 @@ class RAGSystem:
         )
 
         return "\n".join(context_parts)
+
+    def _log_statistics(self) -> None:
+        """Логировать статистику использования RAG системы."""
+        if self.total_queries == 0:
+            return
+
+        avg_score = sum(self.scores) / len(self.scores) if self.scores else 0.0
+        min_score = min(self.scores) if self.scores else 0.0
+        max_score = max(self.scores) if self.scores else 0.0
+        success_rate = (self.successful_queries / self.total_queries * 100) if self.total_queries > 0 else 0.0
+
+        logger.info(
+            f"RAG Statistics (last {self.total_queries} queries): "
+            f"successful={self.successful_queries} ({success_rate:.1f}%), "
+            f"empty_results={self.empty_results}, "
+            f"total_chunks={self.total_chunks_found}, "
+            f"avg_score={avg_score:.3f}, "
+            f"min_score={min_score:.3f}, "
+            f"max_score={max_score:.3f}"
+        )
+
+        # Топ-5 наиболее используемых файлов
+        if self.file_usage:
+            top_files = sorted(self.file_usage.items(), key=lambda x: x[1], reverse=True)[:5]
+            logger.debug(
+                f"RAG Top files: {', '.join([f'{path} ({count})' for path, count in top_files])}"
+            )
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """
+        Получить статистику использования RAG системы.
+
+        Returns:
+            Словарь со статистикой:
+            {
+                "total_queries": int,
+                "successful_queries": int,
+                "empty_results": int,
+                "total_chunks_found": int,
+                "success_rate": float,
+                "avg_score": float,
+                "min_score": float,
+                "max_score": float,
+                "top_files": List[Tuple[str, int]],
+                "collection_count": int
+            }
+        """
+        avg_score = sum(self.scores) / len(self.scores) if self.scores else 0.0
+        min_score = min(self.scores) if self.scores else 0.0
+        max_score = max(self.scores) if self.scores else 0.0
+        success_rate = (self.successful_queries / self.total_queries * 100) if self.total_queries > 0 else 0.0
+
+        # Топ-10 наиболее используемых файлов
+        top_files = sorted(self.file_usage.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Количество документов в коллекции
+        collection_count = 0
+        if self.rag_collection:
+            try:
+                collection_count = self.rag_collection.count()
+            except Exception:
+                pass
+
+        return {
+            "total_queries": self.total_queries,
+            "successful_queries": self.successful_queries,
+            "empty_results": self.empty_results,
+            "total_chunks_found": self.total_chunks_found,
+            "success_rate": success_rate,
+            "avg_score": avg_score,
+            "min_score": min_score,
+            "max_score": max_score,
+            "top_files": top_files,
+            "collection_count": collection_count,
+        }
+
+    def reset_statistics(self) -> None:
+        """Сбросить статистику использования RAG системы."""
+        self.total_queries = 0
+        self.successful_queries = 0
+        self.empty_results = 0
+        self.total_chunks_found = 0
+        self.scores.clear()
+        self.file_usage.clear()
+        logger.info("RAG statistics reset")
 

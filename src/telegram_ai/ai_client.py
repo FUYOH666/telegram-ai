@@ -72,9 +72,14 @@ class AIClient:
             write=10.0,  # Таймаут записи: 10 секунд
             pool=10.0,  # Таймаут пула соединений: 10 секунд
         )
+        # Создаем headers только если api_key не пустой
+        headers = None
+        if api_key and api_key.strip():
+            headers = {"Authorization": f"Bearer {api_key.strip()}"}
+        
         self.client = httpx.AsyncClient(
             timeout=timeout_config,
-            headers={"Authorization": f"Bearer {api_key}"} if api_key else None,
+            headers=headers,
         )
 
         logger.info(

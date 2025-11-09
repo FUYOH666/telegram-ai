@@ -35,6 +35,7 @@ from .tools import Tools
 from .vector_memory import VectorMemory
 from .voice_handler import VoiceHandler
 from .web_search import WebSearchTool
+from .url_parser import URLParser
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class TelegramUserClient:
         self.rag_system: Optional[RAGSystem] = None
         self.meeting_summary: Optional[MeetingSummary] = None
         self.consent_manager: Optional[ConsentManager] = None
+        self.url_parser: Optional[URLParser] = None
 
         # Инициализируем компоненты
         self._init_components()
@@ -126,6 +128,7 @@ class TelegramUserClient:
                 knowledge_base_path=self.config.rag.knowledge_base_path,
                 max_results=self.config.rag.max_results,
                 min_score=self.config.rag.min_score,
+                log_stats_interval=self.config.rag.log_stats_interval,
             )
             logger.info("RAGSystem initialized")
         else:
@@ -198,8 +201,17 @@ class TelegramUserClient:
                 enabled=self.config.sales_flow.enabled,
                 slot_extractor=self.slot_extractor,
                 event_bus=self.event_bus,
+                ai_client=self.ai_client,  # Передаем ai_client для классификации возражений
             )
             logger.info("SalesFlow initialized")
+
+            # LangGraph state machine (если включен)
+            if self.config.sales_flow.use_langgraph:
+                from .sales_chain_langgraph import SalesChainLangGraph
+                self.sales_chain_langgraph = SalesChainLangGraph(self.sales_flow)
+                logger.info("SalesChainLangGraph initialized")
+            else:
+                self.sales_chain_langgraph = None
 
         # Meeting Summary (всегда инициализируем для генерации сводок)
         self.meeting_summary = MeetingSummary()
@@ -231,6 +243,17 @@ class TelegramUserClient:
         # Tools (инструменты для работы с лидами)
         self.tools = Tools(memory=self.memory, web_search_tool=web_search_tool)
         logger.info("Tools initialized")
+
+        # URL Parser (если включен)
+        if self.config.url_parsing.enabled:
+            self.url_parser = URLParser(
+                timeout=self.config.url_parsing.timeout,
+                max_content_length=self.config.url_parsing.max_content_length,
+                max_urls_per_message=self.config.url_parsing.max_urls_per_message,
+            )
+            logger.info("URLParser initialized")
+        else:
+            self.url_parser = None
 
         # Google Calendar (если включен)
         if self.config.google_calendar.enabled:
@@ -343,6 +366,47 @@ class TelegramUserClient:
                 sender = await event.get_sender()
                 chat = await event.get_chat()
                 message_text = event.message.message or ""
+                
+                # Извлекаем URL из WebPage media (если есть)
+                if event.message.media:
+                    from telethon.tl.types import MessageMediaWebPage
+                    if isinstance(event.message.media, MessageMediaWebPage):
+                        logger.info(f"🔗 Found WebPage media, extracting URL...")
+                        if hasattr(event.message.media, 'webpage') and event.message.media.webpage:
+                            webpage_url = getattr(event.message.media.webpage, 'url', None)
+                            if webpage_url:
+                                # Добавляем URL к тексту сообщения если его там нет
+                                if webpage_url not in message_text:
+                                    message_text = f"{message_text} {webpage_url}".strip()
+                                    logger.info(f"🔗 Extracted URL from WebPage media: {webpage_url}")
+                                else:
+                                    logger.debug(f"🔗 URL already in message_text: {webpage_url}")
+                            else:
+                                logger.debug(f"🔗 WebPage media found but no URL attribute")
+                        else:
+                            logger.debug(f"🔗 WebPage media found but no webpage attribute")
+                
+                # Извлекаем URL из entities (если есть)
+                if event.message.entities:
+                    from telethon.tl.types import MessageEntityUrl, MessageEntityTextUrl
+                    logger.info(f"🔗 Found {len(event.message.entities)} entities, checking for URLs...")
+                    for entity in event.message.entities:
+                        if isinstance(entity, MessageEntityUrl):
+                            # URL встроен в текст сообщения
+                            url = message_text[entity.offset:entity.offset + entity.length]
+                            if url and url not in message_text:
+                                message_text = f"{message_text} {url}".strip()
+                                logger.info(f"🔗 Extracted URL from entity: {url}")
+                        elif isinstance(entity, MessageEntityTextUrl):
+                            # URL в атрибуте url
+                            url = getattr(entity, 'url', None)
+                            if url and url not in message_text:
+                                message_text = f"{message_text} {url}".strip()
+                                logger.info(f"🔗 Extracted URL from text entity: {url}")
+                
+                # Логируем финальный message_text для отладки
+                if message_text and ('http://' in message_text or 'https://' in message_text):
+                    logger.info(f"🔗 Final message_text contains URL: {message_text[:150]}...")
 
                 # Проверяем, включен ли typing indicator и умное распределение
                 smart_distribution = (
@@ -1045,39 +1109,102 @@ class TelegramUserClient:
                                 current_intent = detected_intent.value
 
                     # Определяем переход на следующий этап
-                    new_stage = self.sales_flow.detect_stage_transition(
-                        message_text, current_stage, is_first_message=is_first_message
-                    )
-                    if new_stage:
-                        logger.info(
-                            f"Sales flow: {current_stage.value} -> {new_stage.value}"
+                    # Используем LangGraph если включен, иначе простую state machine
+                    if self.sales_chain_langgraph:
+                        # Используем LangGraph state machine
+                        try:
+                            result = await self.sales_chain_langgraph.process_message(
+                                message_text, user_context_data, current_intent, is_first_message=is_first_message
+                            )
+                            new_stage = result.get("next_stage")
+                            user_context_data = result.get("context_data", user_context_data)
+                            objection_type = result.get("objection_type")
+                            
+                            if new_stage:
+                                logger.info(
+                                    f"Sales flow (LangGraph): {current_stage.value} -> {new_stage.value}"
+                                )
+                                if objection_type:
+                                    logger.info(
+                                        f"Objection classified as {objection_type.value} for message: {message_text[:50]}..."
+                                    )
+                                self.memory.save_user_context(sender.id, user_context_data)
+                                current_stage = new_stage
+                                # Сбрасываем счетчик сообщений при переходе на другой этап
+                                if user_context_data:
+                                    try:
+                                        context_dict = json.loads(user_context_data)
+                                        if current_stage != SalesStage.PRESENTATION:
+                                            context_dict.pop(
+                                                "presentation_messages_count", None
+                                            )
+                                        user_context_data = json.dumps(context_dict)
+                                        self.memory.save_user_context(
+                                            sender.id, user_context_data
+                                        )
+                                    except (json.JSONDecodeError, ValueError):
+                                        pass
+                        except Exception as e:
+                            logger.error(f"Error in LangGraph processing: {e}", exc_info=True)
+                            # Fallback на простую state machine
+                            new_stage = self.sales_flow.detect_stage_transition(
+                                message_text, current_stage, is_first_message=is_first_message
+                            )
+                            if new_stage:
+                                user_context_data = self.sales_flow.update_stage(
+                                    user_context_data, new_stage
+                                )
+                                if new_stage == SalesStage.OBJECTIONS:
+                                    objection_type = await self.sales_flow.classify_objection(message_text)
+                                    user_context_data = self.sales_flow.add_objection_to_history(
+                                        user_context_data, objection_type, message_text
+                                    )
+                                self.memory.save_user_context(sender.id, user_context_data)
+                                current_stage = new_stage
+                    else:
+                        # Используем простую state machine
+                        new_stage = self.sales_flow.detect_stage_transition(
+                            message_text, current_stage, is_first_message=is_first_message
                         )
+                        if new_stage:
+                            logger.info(
+                                f"Sales flow: {current_stage.value} -> {new_stage.value}"
+                            )
+                            user_context_data = self.sales_flow.update_stage(
+                                user_context_data, new_stage
+                            )
+                            # Если переходим в OBJECTIONS - классифицируем возражение и добавляем в историю
+                            if new_stage == SalesStage.OBJECTIONS:
+                                objection_type = await self.sales_flow.classify_objection(message_text)
+                                user_context_data = self.sales_flow.add_objection_to_history(
+                                    user_context_data, objection_type, message_text
+                                )
+                                logger.info(
+                                    f"Objection classified as {objection_type.value} for message: {message_text[:50]}..."
+                                )
+                            self.memory.save_user_context(sender.id, user_context_data)
+                            current_stage = new_stage
+                            # Сбрасываем счетчик сообщений при переходе на другой этап
+                            if user_context_data:
+                                try:
+                                    context_dict = json.loads(user_context_data)
+                                    if current_stage != SalesStage.PRESENTATION:
+                                        context_dict.pop(
+                                            "presentation_messages_count", None
+                                        )
+                                    user_context_data = json.dumps(context_dict)
+                                    self.memory.save_user_context(
+                                        sender.id, user_context_data
+                                    )
+                                except (json.JSONDecodeError, ValueError):
+                                    pass
+                    
+                    # Обновляем контекст если его нет (общее для обоих случаев)
+                    if not user_context_data:
                         user_context_data = self.sales_flow.update_stage(
-                            user_context_data, new_stage
+                            None, current_stage
                         )
                         self.memory.save_user_context(sender.id, user_context_data)
-                        current_stage = new_stage
-                        # Сбрасываем счетчик сообщений при переходе на другой этап
-                        if user_context_data:
-                            try:
-                                context_dict = json.loads(user_context_data)
-                                if current_stage != SalesStage.PRESENTATION:
-                                    context_dict.pop(
-                                        "presentation_messages_count", None
-                                    )
-                                user_context_data = json.dumps(context_dict)
-                                self.memory.save_user_context(
-                                    sender.id, user_context_data
-                                )
-                            except (json.JSONDecodeError, ValueError):
-                                pass
-                    else:
-                        # Обновляем контекст если его нет
-                        if not user_context_data:
-                            user_context_data = self.sales_flow.update_stage(
-                                None, current_stage
-                            )
-                            self.memory.save_user_context(sender.id, user_context_data)
 
                     # Счетчик сообщений на этапе PRESENTATION
                     presentation_messages_count = 0
@@ -1398,9 +1525,25 @@ class TelegramUserClient:
                     and self.sales_flow.enabled
                     and current_stage is not None
                 ):
-                    stage_modifier = self.sales_flow.get_stage_prompt_modifier(
-                        current_stage
-                    )
+                    # Для этапа OBJECTIONS используем улучшенный метод с классификацией возражений
+                    if current_stage == SalesStage.OBJECTIONS:
+                        # Получаем последнее возражение из истории для классификации
+                        objection_history = self.sales_flow.get_objection_history(user_context_data)
+                        objection_type = None
+                        if objection_history:
+                            last_objection = objection_history[-1]
+                            try:
+                                from .sales_flow import ObjectionType
+                                objection_type = ObjectionType(last_objection.get("type", "other"))
+                            except (ValueError, AttributeError):
+                                pass
+                        stage_modifier = self.sales_flow.get_objection_prompt_modifier(
+                            user_context_data, objection_type
+                        )
+                    else:
+                        stage_modifier = self.sales_flow.get_stage_prompt_modifier(
+                            current_stage
+                        )
                 else:
                     stage_modifier = None
 
@@ -1551,6 +1694,49 @@ class TelegramUserClient:
                             logger.error(
                                 f"Error performing web search: {e}", exc_info=True
                             )
+
+                # Парсинг URL в сообщении (если включен)
+                if (
+                    self.url_parser
+                    and self.config.url_parsing.enabled
+                    and message_text
+                ):
+                    try:
+                        logger.info(
+                            f"🔗 Checking for URLs in message: {message_text[:100]}..."
+                        )
+                        parsed_urls = await self.url_parser.parse_urls_from_text(message_text)
+                        if parsed_urls:
+                            logger.info(
+                                f"✅ Parsed {len(parsed_urls)} URLs from message"
+                            )
+                            formatted_content = self.url_parser.format_parsed_content(
+                                parsed_urls
+                            )
+                            if formatted_content:
+                                # Добавляем содержимое веб-страниц в контекст как системное сообщение
+                                context.append(
+                                    {
+                                        "role": "system",
+                                        "content": formatted_content,
+                                    }
+                                )
+                                logger.info(
+                                    f"Added parsed URL content to context ({len(formatted_content)} chars)"
+                                )
+                        else:
+                            logger.debug(f"🔗 No URLs found in message_text or parsing failed")
+                    except Exception as e:
+                        logger.error(
+                            f"Error parsing URLs: {e}", exc_info=True
+                        )
+                        # Не прерываем обработку сообщения при ошибке парсинга URL
+                elif not self.url_parser:
+                    logger.debug(f"🔗 URL parser not initialized")
+                elif not self.config.url_parsing.enabled:
+                    logger.debug(f"🔗 URL parsing disabled in config")
+                elif not message_text:
+                    logger.debug(f"🔗 No message_text to parse")
 
                 # Получаем динамические параметры генерации на основе intent и stage
                 generation_params = {}
@@ -2723,6 +2909,9 @@ class TelegramUserClient:
 
         if self.voice_handler:
             await self.voice_handler.close()
+
+        if self.url_parser:
+            await self.url_parser.close()
 
         # Закрываем базу данных перед закрытием Telethon клиента
         # Это предотвращает блокировки SQLite при сохранении состояния сессии

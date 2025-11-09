@@ -1,14 +1,29 @@
 """FastAPI приложение для REST API Gateway."""
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from shared.config.settings import Config
 
 logger = logging.getLogger(__name__)
+
+# Prometheus метрики
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"],
+)
+
+REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "endpoint"],
+)
 
 
 @asynccontextmanager
@@ -87,6 +102,40 @@ def create_app(config: Config) -> FastAPI:
     async def health_check():
         """Health check endpoint."""
         return {"status": "ok", "service": "api-gateway"}
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint."""
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    # Middleware для сбора метрик
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        """Middleware для сбора метрик Prometheus."""
+        start_time = time.time()
+        
+        # Обработка запроса
+        response = await call_next(request)
+        
+        # Вычисление длительности
+        duration = time.time() - start_time
+        
+        # Получение пути endpoint (без query параметров)
+        endpoint = request.url.path
+        
+        # Сбор метрик
+        REQUEST_COUNT.labels(
+            method=request.method,
+            endpoint=endpoint,
+            status=response.status_code,
+        ).inc()
+        
+        REQUEST_DURATION.labels(
+            method=request.method,
+            endpoint=endpoint,
+        ).observe(duration)
+        
+        return response
 
     return app
 

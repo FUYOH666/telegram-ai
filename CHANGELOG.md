@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.7.1] - 2025-11-07
+
+### Added
+
+- **Конфигурация линтеров и инструментов качества кода**
+  - Добавлена конфигурация Ruff в `pyproject.toml` с правилами для Python 3.12
+  - Добавлена конфигурация Pyright для проверки типов
+  - Настроены правила линтинга: pycodestyle, pyflakes, isort, pep8-naming, pyupgrade, flake8-bugbear и другие
+  - Конфигурация Bandit для проверки безопасности кода
+
+- **Pre-commit hooks**
+  - Создан `.pre-commit-config.yaml` с хуками для всех инструментов
+  - Автоматическая проверка кода перед коммитом
+  - Хуки: ruff (lint + format), pyright, bandit, codespell, стандартные pre-commit hooks
+
+- **Инструменты безопасности**
+  - Добавлены `bandit`, `codespell`, `pip-audit`, `pre-commit` в dev-зависимости
+  - Настроена конфигурация Bandit с исключениями для тестов
+
+- **Улучшение Dockerfile**
+  - Все Dockerfile обновлены с multi-stage build для оптимизации размера образов
+  - Добавлен non-root пользователь (`appuser`) для безопасности
+  - Добавлены health checks для всех сервисов
+  - Правильные права доступа для директорий данных и логов
+
+- **Security scan в CI/CD**
+  - Добавлен отдельный job `security-scan` в GitHub Actions
+  - Trivy для сканирования файловой системы и Docker образов
+  - pip-audit для проверки уязвимостей в зависимостях
+  - bandit и codespell в основном test job
+  - Убраны `continue-on-error` для критичных проверок (fail-fast подход)
+
+- **Prometheus метрики**
+  - Добавлен `prometheus-client` в зависимости
+  - Создан `/metrics` endpoint в API Gateway
+  - Middleware для автоматического сбора метрик (RPS, латентность)
+  - Метрики: `http_requests_total`, `http_request_duration_seconds`
+
+- **Документация**
+  - Создан `next_steps.md` с планами развития проекта
+  - Обновлен README.md с информацией о качестве кода и безопасности
+  - Добавлена английская версия README (README_EN.md)
+
+### Changed
+
+- **CI/CD**
+  - Убраны `continue-on-error` для pyright и pytest (fail-fast поведение)
+  - Добавлены проверки безопасности в каждый CI run
+  - Улучшена структура CI workflow с отдельным security-scan job
+
+- **Docker образы**
+  - Все образы теперь используют multi-stage build
+  - Размер образов оптимизирован за счет разделения build и runtime стадий
+  - Улучшена безопасность за счет использования non-root пользователя
+
+### Technical
+
+- **Новые конфигурационные файлы**
+  - `.pre-commit-config.yaml` - конфигурация pre-commit hooks
+  - `next_steps.md` - планы развития проекта
+
+- **Обновленные файлы**
+  - `pyproject.toml` - добавлены секции `[tool.ruff]`, `[tool.pyright]`, `[tool.bandit]`
+  - `.github/workflows/ci.yml` - добавлен security-scan job, улучшен fail-fast
+  - `services/*/Dockerfile` - все 4 Dockerfile обновлены с multi-stage build и non-root user
+  - `services/api-gateway/src/main.py` - добавлен `/metrics` endpoint и middleware
+
 ## [0.7.0] - 2025-11-06
 
 ### Added

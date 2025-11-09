@@ -37,9 +37,79 @@ jobs:
     
     - name: Type check with pyright
       run: uv run pyright
-      continue-on-error: true
+    
+    - name: Security check with bandit
+      run: uv run bandit -r src services shared -c pyproject.toml
+    
+    - name: Spell check with codespell
+      run: uv run codespell --ignore-words-list=nd,te,fo,ba,adres,ba,referer
+    
+    - name: Audit dependencies with pip-audit
+      run: uv run pip-audit --desc
     
     - name: Run tests
       run: uv run pytest
-      continue-on-error: true
+
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Build Docker images for security scan
+      run: |
+        docker build -t telegram-ai-bot:test -f services/telegram-bot/Dockerfile .
+        docker build -t telegram-ai-api:test -f services/api-gateway/Dockerfile .
+        docker build -t telegram-ai-worker:test -f services/worker/Dockerfile .
+        docker build -t telegram-ai-analytics:test -f services/analytics/Dockerfile .
+    
+    - name: Scan Docker images with Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'telegram-ai-bot:test'
+        format: 'table'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Scan Docker images with Trivy (API Gateway)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'telegram-ai-api:test'
+        format: 'table'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Scan Docker images with Trivy (Worker)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'telegram-ai-worker:test'
+        format: 'table'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Scan Docker images with Trivy (Analytics)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'telegram-ai-analytics:test'
+        format: 'table'
+        exit-code: '1'
+        severity: 'CRITICAL,HIGH'
 

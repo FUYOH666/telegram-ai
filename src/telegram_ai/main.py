@@ -43,6 +43,16 @@ async def main():
         # Валидируем конфигурацию
         config.validate()
 
+        # Проверяем доступность AI сервера
+        try:
+            await config.validate_ai_server()
+        except ValueError as e:
+            logger.error(f"AI server validation failed: {e}")
+            print(f"\n❌ Ошибка проверки AI сервера:\n{e}\n")
+            sys.exit(1)
+        except Exception as e:
+            logger.warning(f"Could not validate AI server (non-critical): {e}")
+
         # Проверяем, не запущен ли уже другой экземпляр
         import subprocess
         try:
@@ -187,16 +197,52 @@ async def health_check():
     if config.asr_server.enabled:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
+                # Проверяем доступность ASR сервера через эндпоинт /transcribe
+                # Сервер должен отвечать даже на пустой POST (422 = Unprocessable Entity означает что сервер работает)
+                asr_checked = False
                 try:
-                    response = await client.get(f"{config.asr_server.base_url}/health")
-                    if response.status_code == 200:
-                        checks.append(f"✅ ASR сервер доступен: {config.asr_server.base_url}")
-                    else:
-                        issues.append(f"⚠️  ASR сервер вернул статус {response.status_code}")
+                    # Пробуем POST на /transcribe без файла - должен вернуть 422 (сервер работает, но нет файла)
+                    response = await client.post(f"{config.asr_server.base_url}/transcribe")
+                    if response.status_code == 422:
+                        # 422 = Unprocessable Entity - сервер работает, но требует файл
+                        checks.append(f"✅ ASR сервер доступен: {config.asr_server.base_url} (эндпоинт /transcribe работает)")
+                        asr_checked = True
+                    elif response.status_code in (200, 404, 405):
+                        checks.append(f"✅ ASR сервер доступен: {config.asr_server.base_url} (статус {response.status_code})")
+                        asr_checked = True
                 except httpx.TimeoutException:
-                    issues.append(f"❌ ASR сервер недоступен (таймаут): {config.asr_server.base_url}")
-                except Exception as e:
-                    issues.append(f"❌ ASR сервер недоступен: {e}")
+                    pass
+                except Exception:
+                    pass
+                
+                # Если POST не сработал, пробуем GET на разные эндпоинты
+                if not asr_checked:
+                    for endpoint in ["/health", "/", "/transcribe"]:
+                        try:
+                            response = await client.get(f"{config.asr_server.base_url}{endpoint}")
+                            if response.status_code in (200, 404, 405):  # 405 = Method Not Allowed (сервер есть, но GET не поддерживается)
+                                checks.append(f"✅ ASR сервер доступен: {config.asr_server.base_url} (проверен через {endpoint})")
+                                asr_checked = True
+                                break
+                        except httpx.TimeoutException:
+                            continue
+                        except Exception:
+                            continue
+                
+                if not asr_checked:
+                    # Если ничего не сработало, проверяем базовое подключение
+                    try:
+                        response = await client.get(f"{config.asr_server.base_url}/", timeout=5.0)
+                        if response.status_code in (200, 404):
+                            checks.append(f"✅ ASR сервер доступен: {config.asr_server.base_url} (сервер отвечает)")
+                        else:
+                            issues.append(f"⚠️  ASR сервер вернул статус {response.status_code}")
+                    except httpx.TimeoutException:
+                        issues.append(f"❌ ASR сервер недоступен (таймаут): {config.asr_server.base_url}")
+                    except httpx.ConnectError:
+                        issues.append(f"❌ ASR сервер недоступен (не удалось подключиться): {config.asr_server.base_url}")
+                    except Exception as e:
+                        issues.append(f"⚠️  ASR сервер: {e}")
         except Exception as e:
             issues.append(f"❌ Ошибка проверки ASR сервера: {e}")
     else:
@@ -333,10 +379,95 @@ async def health_check():
         sys.exit(0)
 
 
+async def rag_stats():
+    """Команда для вывода статистики использования RAG системы."""
+    try:
+        # Загружаем конфигурацию
+        config_path = Path(__file__).parent.parent.parent / "config.yaml"
+        config = Config.from_yaml(str(config_path))
+        config.validate()
+
+        print("📊 Статистика использования RAG системы\n")
+
+        # Проверяем, включена ли RAG система
+        if not config.rag.enabled:
+            print("⚠️  RAG система отключена в конфигурации")
+            sys.exit(0)
+
+        # Инициализируем компоненты для доступа к RAG системе
+        from .ai_client import AIClient
+        from .vector_memory import VectorMemory
+        from .rag import RAGSystem
+
+        ai_client = AIClient(
+            base_url=config.ai_server.base_url,
+            model=config.ai_server.model,
+            api_key=config.ai_server.api_key,
+            timeout=config.ai_server.timeout,
+            max_retries=config.ai_server.max_retries,
+            max_tokens=config.ai_server.max_tokens,
+            system_prompt=config.ai_server.system_prompt,
+            temperature=config.ai_server.temperature,
+            timezone_name=config.ai_server.timezone,
+            date_format=config.ai_server.date_format,
+        )
+
+        # Vector Memory для RAG
+        vector_memory = VectorMemory(
+            persist_directory=config.memory.vector_db_path,
+            collection_name="rag_knowledge_base",
+            ai_client=ai_client,
+            enabled=True,
+        )
+
+        # RAG System
+        rag_system = RAGSystem(
+            vector_memory=vector_memory,
+            enabled=config.rag.enabled,
+            knowledge_base_path=config.rag.knowledge_base_path,
+            max_results=config.rag.max_results,
+            min_score=config.rag.min_score,
+            log_stats_interval=config.rag.log_stats_interval,
+        )
+
+        # Получаем статистику
+        stats = rag_system.get_statistics()
+
+        # Выводим статистику
+        print(f"Всего запросов: {stats['total_queries']}")
+        print(f"Успешных запросов: {stats['successful_queries']} ({stats['success_rate']:.1f}%)")
+        print(f"Пустых результатов: {stats['empty_results']}")
+        print(f"Всего найдено чанков: {stats['total_chunks_found']}")
+        print(f"\nСтатистика по релевантности:")
+        print(f"  Средний score: {stats['avg_score']:.3f}")
+        print(f"  Минимальный score: {stats['min_score']:.3f}")
+        print(f"  Максимальный score: {stats['max_score']:.3f}")
+        print(f"\nДокументов в коллекции: {stats['collection_count']}")
+
+        if stats['top_files']:
+            print(f"\nТоп-10 наиболее используемых файлов:")
+            for i, (file_path, count) in enumerate(stats['top_files'], 1):
+                print(f"  {i}. {file_path}: {count} использований")
+        else:
+            print("\nФайлы еще не использовались")
+
+        sys.exit(0)
+
+    except Exception as e:
+        logger.error(f"Error getting RAG statistics: {e}", exc_info=True)
+        print(f"\n❌ Ошибка при получении статистики: {e}")
+        sys.exit(1)
+
+
 def cli():
     """CLI точка входа."""
-    if len(sys.argv) > 1 and sys.argv[1] == "health":
-        asyncio.run(health_check())
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "health":
+            asyncio.run(health_check())
+        elif sys.argv[1] == "rag_stats":
+            asyncio.run(rag_stats())
+        else:
+            asyncio.run(main())
     else:
         asyncio.run(main())
 

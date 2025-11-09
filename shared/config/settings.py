@@ -293,7 +293,16 @@ class RateLimitingConfig(BaseSettings):
 class SalesFlowConfig(BaseSettings):
     """Конфигурация скрипта продаж."""
 
-    enabled: bool = Field(default=True, description="Включить скрипт продаж")
+    enabled: bool = Field(
+        default=True,
+        description="Включить скрипт продаж",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    use_langgraph: bool = Field(
+        default=True,
+        description="Использовать LangGraph state machine вместо простой state machine",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
 
     model_config = SettingsConfigDict(env_prefix="SALES_FLOW_")
 
@@ -329,6 +338,28 @@ class WebSearchConfig(BaseSettings):
     timeout: int = Field(default=10, description="Таймаут запроса в секундах")
 
     model_config = SettingsConfigDict(env_prefix="WEB_SEARCH_")
+
+
+class URLParsingConfig(BaseSettings):
+    """Конфигурация парсинга URL в сообщениях."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Включить автоматический парсинг URL в сообщениях",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    max_content_length: int = Field(
+        default=10000,
+        description="Максимальная длина извлеченного текста (символов)",
+    )
+    timeout: int = Field(
+        default=10, description="Таймаут запроса в секундах"
+    )
+    max_urls_per_message: int = Field(
+        default=3, description="Максимальное количество URL для парсинга в одном сообщении"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="URL_PARSING_")
 
 
 class IntentClassifierConfig(BaseSettings):
@@ -368,6 +399,10 @@ class RAGConfig(BaseSettings):
         default=True,
         description="Автоматически загружать базу знаний при старте приложения",
     )
+    log_stats_interval: int = Field(
+        default=100,
+        description="Интервал для логирования статистики использования RAG (количество запросов)",
+    )
 
     model_config = SettingsConfigDict(env_prefix="RAG_")
 
@@ -402,6 +437,7 @@ class Config(BaseSettings):
     sales_flow: SalesFlowConfig
     slot_extraction: SlotExtractionConfig
     web_search: WebSearchConfig
+    url_parsing: URLParsingConfig
     intent_classifier: IntentClassifierConfig
     rag: RAGConfig
     meeting_summary: MeetingSummaryConfig = Field(
@@ -496,6 +532,15 @@ class Config(BaseSettings):
             web_search_data["enabled"] = bool(enabled_val)
         web_search = WebSearchConfig(**web_search_data)
 
+        # URL Parsing конфигурация
+        url_parsing_data = yaml_data.get("url_parsing", {})
+        enabled_val = url_parsing_data.get("enabled", True)
+        if isinstance(enabled_val, str):
+            url_parsing_data["enabled"] = enabled_val.lower() in ("true", "1", "yes")
+        elif not isinstance(enabled_val, bool):
+            url_parsing_data["enabled"] = bool(enabled_val)
+        url_parsing = URLParsingConfig(**url_parsing_data)
+
         # Intent Classifier конфигурация
         intent_classifier = IntentClassifierConfig(**yaml_data.get("intent_classifier", {}))
 
@@ -529,6 +574,7 @@ class Config(BaseSettings):
             sales_flow=sales_flow,
             slot_extraction=slot_extraction,
             web_search=web_search,
+            url_parsing=url_parsing,
             intent_classifier=intent_classifier,
             rag=rag,
             meeting_summary=meeting_summary,
@@ -564,6 +610,91 @@ class Config(BaseSettings):
                 return value
         else:
             return data
+
+    async def validate_ai_server(self) -> None:
+        """
+        Проверка доступности AI сервера и правильности эндпоинта.
+
+        Raises:
+            ValueError: При ошибке подключения или недоступности эндпоинта
+        """
+        import httpx
+
+        base_url = self.ai_server.base_url.rstrip("/")
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Пробуем сначала /v1/models (GET запрос, безопаснее)
+            try:
+                response = await client.get(f"{base_url}/v1/models")
+                if response.status_code == 200:
+                    logger.info(f"✅ AI сервер доступен: {base_url}/v1/models")
+                    return
+                elif response.status_code == 404:
+                    logger.warning(
+                        f"⚠️  Эндпоинт /v1/models вернул 404. "
+                        f"Сервер отвечает, но эндпоинт не найден. "
+                        f"Проверьте правильность base_url и что сервер поддерживает OpenAI-compatible API."
+                    )
+                    # Пробуем проверить другие возможные пути
+                    alternative_paths = [
+                        "/api/v1/models",
+                        "/models",
+                        "/health",
+                        "/",
+                    ]
+                    for path in alternative_paths:
+                        try:
+                            alt_response = await client.get(f"{base_url}{path}", follow_redirects=True)
+                            if alt_response.status_code == 200:
+                                logger.info(f"✅ Найден альтернативный эндпоинт: {base_url}{path}")
+                                logger.warning(
+                                    f"⚠️  Возможно, нужно использовать другой base_url. "
+                                    f"Текущий: {base_url}, найденный эндпоинт: {path}"
+                                )
+                                break
+                        except Exception:
+                            pass
+                else:
+                    logger.warning(
+                        f"⚠️  AI сервер вернул статус {response.status_code} для /v1/models"
+                    )
+            except httpx.TimeoutException:
+                raise ValueError(
+                    f"AI сервер недоступен (таймаут): {base_url}. "
+                    "Убедитесь, что сервер запущен и доступен по указанному адресу."
+                )
+            except httpx.ConnectError:
+                raise ValueError(
+                    f"Не удалось подключиться к AI серверу: {base_url}. "
+                    "Убедитесь, что сервер запущен и доступен по указанному адресу."
+                )
+            except Exception as e:
+                logger.debug(f"Ошибка при проверке /v1/models: {e}")
+
+            # Если /v1/models не сработал, пробуем проверить базовый URL
+            try:
+                response = await client.get(base_url, follow_redirects=True)
+                if response.status_code in (200, 404):
+                    # Сервер отвечает, но эндпоинт может быть неправильным
+                    logger.warning(
+                        f"⚠️  AI сервер отвечает на {base_url}, но эндпоинт /v1/models или /v1/chat/completions недоступен. "
+                        f"Проверьте правильность base_url и что сервер поддерживает OpenAI-compatible API. "
+                        f"Возможно, нужно добавить префикс пути (например, /api/v1/chat/completions)."
+                    )
+                    # Не падаем с ошибкой, только предупреждаем - возможно, эндпоинт будет работать при реальном запросе
+                    return
+            except Exception:
+                pass
+
+            # Если ничего не сработало, выдаем ошибку
+            raise ValueError(
+                f"AI сервер недоступен или эндпоинт не найден: {base_url}. "
+                f"Проверьте:\n"
+                f"  1. Запущен ли AI сервер (vLLM или OpenAI-compatible API)\n"
+                f"  2. Правильность base_url в config.yaml или AI_SERVER_BASE_URL в .env\n"
+                f"  3. Что сервер поддерживает эндпоинты /v1/models или /v1/chat/completions\n"
+                f"  4. Возможно, нужен другой путь (например, /api/v1/chat/completions вместо /v1/chat/completions)"
+            )
 
     def validate(self) -> None:
         """

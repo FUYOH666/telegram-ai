@@ -253,7 +253,16 @@ class ASRServerConfig(BaseSettings):
 class SalesFlowConfig(BaseSettings):
     """Конфигурация скрипта продаж."""
 
-    enabled: bool = Field(default=True, description="Включить скрипт продаж")
+    enabled: bool = Field(
+        default=True,
+        description="Включить скрипт продаж",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    use_langgraph: bool = Field(
+        default=True,
+        description="Использовать LangGraph state machine вместо простой state machine",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
 
     model_config = SettingsConfigDict(env_prefix="SALES_FLOW_")
 
@@ -289,6 +298,28 @@ class WebSearchConfig(BaseSettings):
     timeout: int = Field(default=10, description="Таймаут запроса в секундах")
 
     model_config = SettingsConfigDict(env_prefix="WEB_SEARCH_")
+
+
+class URLParsingConfig(BaseSettings):
+    """Конфигурация парсинга URL в сообщениях."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Включить автоматический парсинг URL в сообщениях",
+        json_schema_extra={"env_parse": lambda v: v.lower() in ("true", "1", "yes") if isinstance(v, str) else bool(v)},
+    )
+    max_content_length: int = Field(
+        default=10000,
+        description="Максимальная длина извлеченного текста (символов)",
+    )
+    timeout: int = Field(
+        default=10, description="Таймаут запроса в секундах"
+    )
+    max_urls_per_message: int = Field(
+        default=3, description="Максимальное количество URL для парсинга в одном сообщении"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="URL_PARSING_")
 
 
 class IntentClassifierConfig(BaseSettings):
@@ -328,6 +359,10 @@ class RAGConfig(BaseSettings):
         default=True,
         description="Автоматически загружать базу знаний при старте приложения",
     )
+    log_stats_interval: int = Field(
+        default=100,
+        description="Интервал для логирования статистики использования RAG (количество запросов)",
+    )
 
     model_config = SettingsConfigDict(env_prefix="RAG_")
 
@@ -360,6 +395,7 @@ class Config(BaseSettings):
     sales_flow: SalesFlowConfig
     slot_extraction: SlotExtractionConfig
     web_search: WebSearchConfig
+    url_parsing: URLParsingConfig
     intent_classifier: IntentClassifierConfig
     rag: RAGConfig
     meeting_summary: MeetingSummaryConfig = Field(
@@ -446,6 +482,15 @@ class Config(BaseSettings):
             web_search_data["enabled"] = bool(enabled_val)
         web_search = WebSearchConfig(**web_search_data)
 
+        # URL Parsing конфигурация
+        url_parsing_data = yaml_data.get("url_parsing", {})
+        enabled_val = url_parsing_data.get("enabled", True)
+        if isinstance(enabled_val, str):
+            url_parsing_data["enabled"] = enabled_val.lower() in ("true", "1", "yes")
+        elif not isinstance(enabled_val, bool):
+            url_parsing_data["enabled"] = bool(enabled_val)
+        url_parsing = URLParsingConfig(**url_parsing_data)
+
         # Intent Classifier конфигурация
         intent_classifier = IntentClassifierConfig(**yaml_data.get("intent_classifier", {}))
 
@@ -477,6 +522,7 @@ class Config(BaseSettings):
             sales_flow=sales_flow,
             slot_extraction=slot_extraction,
             web_search=web_search,
+            url_parsing=url_parsing,
             intent_classifier=intent_classifier,
             rag=rag,
             meeting_summary=meeting_summary,
